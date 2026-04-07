@@ -87,6 +87,12 @@ func RunLoop(
 	skills := LoadSkills(workDir)
 	mcpConfig := LoadMCPConfig(workDir)
 
+	// ── Long-term memory: load index + top relevant entries for this turn ──
+	// Computed once before the iteration loop — the snippet only depends
+	// on the first user message, so recomputing per-iteration would just
+	// defeat the prompt cache.
+	memoryContext := BuildMemoryContext(workDir, messages)
+
 	// ── Process slash commands ──
 	if len(messages) > 0 {
 		lastMsg := messages[len(messages)-1]
@@ -202,7 +208,7 @@ func RunLoop(
 		}
 
 		// Build request with full context
-		sysPrompt := buildSystemPrompt(responseLang) + projectPrompt + projectCtx + skillText + ragContext
+		sysPrompt := buildSystemPrompt(responseLang) + projectPrompt + projectCtx + skillText + ragContext + memoryContext
 		req := &types.MessagesRequest{
 			Model:    model,
 			System:   mustJSON([]map[string]string{{"type": "text", "text": sysPrompt}}),
@@ -301,6 +307,15 @@ func RunLoop(
 
 		// ── No tool calls → done ──
 		if len(toolUses) == 0 {
+			// ── Memory hooks: extract durable memories from this
+			//    conversation and (maybe) consolidate. Both run in
+			//    background goroutines and their failures are logged,
+			//    never surfaced to the user. We only hook normal
+			//    termination — the max-iterations branch below is a
+			//    failure mode that would feed noisy data to extraction.
+			ExtractMemoriesAsync(ctx, provider, model, workDir, messages)
+			MaybeConsolidateAsync(ctx, provider, model, workDir)
+
 			eventCh <- Event{Type: "done", Data: map[string]interface{}{
 				"iterations":     i + 1,
 				"tokenEstimate": tokenEstimate,

@@ -15,11 +15,13 @@ web/dist/
 # Config (user-specific)
 config.json
 
-# Private data (conversations, memory, sessions)
-MEMORY.md
-memory/
-conversations/
-sessions/
+# Private data (conversations, memory, sessions) at the project root only.
+# Leading slash anchors these to the repo root so subpackages like
+# internal/memory/ or web/memory.tsx are NOT accidentally ignored.
+/MEMORY.md
+/memory/
+/conversations/
+/sessions/
 
 # IDE
 .idea/
