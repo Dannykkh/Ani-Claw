@@ -237,7 +237,7 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
   }
 
   return (
-    <div className="flex flex-col h-full w-full">
+    <div className="flex flex-col flex-1 min-w-0 h-full w-full">
       {/* Header */}
       <div className="px-4 py-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] flex items-center justify-between">
         <div className="flex items-center gap-2">
