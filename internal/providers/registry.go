@@ -9,7 +9,7 @@ import (
 )
 
 var ProviderOrder = []string{
-	"anthropic", "openai", "gemini", "groq", "ollama", "github-copilot", "zai",
+	"anthropic", "openai", "gemini", "groq", "ollama", "sglang", "github-copilot", "zai",
 }
 
 // customProviders stores dynamically registered providers (e.g., remote Ollama instances)
@@ -71,6 +71,8 @@ func Create(name string, cfg *types.ProviderConfig) (types.Provider, error) {
 		return NewGroq(cfg), nil
 	case "ollama":
 		return NewOllama(cfg), nil
+	case "sglang":
+		return NewSGLang(cfg), nil
 	case "github-copilot":
 		return NewGitHubCopilot(cfg), nil
 	case "zai":
@@ -120,6 +122,35 @@ func NewOllama(cfg *types.ProviderConfig) types.Provider {
 			{ID: "llama4-scout:latest", DisplayName: "Llama 4 Scout (Meta)"},
 			{ID: "deepseek-r1:14b", DisplayName: "DeepSeek R1 14B (추론)"},
 			{ID: "mistral:latest", DisplayName: "Mistral"},
+		},
+	}
+}
+
+// NewSGLang connects to a self-hosted SGLang server (OpenAI-compatible).
+// SGLang serves models on /v1/chat/completions and usually runs without auth
+// unless launched with --api-key. Tool calling / reasoning separation are
+// configured server-side (--tool-call-parser / --reasoning-parser), so this
+// provider just forwards the OpenAI-compatible request like Ollama does.
+func NewSGLang(cfg *types.ProviderConfig) types.Provider {
+	base := coalesce(cfg.BaseURL, os.Getenv("SGLANG_BASE_URL"), "http://localhost:30000")
+	key := coalesce(cfg.APIKey, os.Getenv("SGLANG_API_KEY"))
+	return &OpenAICompat{
+		ProviderName: "sglang",
+		ProviderDisp: "SGLang (self-hosted)",
+		BaseURL:      base,
+		AuthHeader: func() (string, string) {
+			if key == "" {
+				return "", "" // no auth — server launched without --api-key
+			}
+			return "Authorization", "Bearer " + key
+		},
+		// Examples that fit a 16GB GPU (quantized). Set ID to match the
+		// --model-path / --served-model-name you actually launched.
+		ModelList: []types.ModelInfo{
+			{ID: "Qwen/Qwen2.5-Coder-7B-Instruct", DisplayName: "Qwen2.5 Coder 7B (coding)", ContextWindow: 32768},
+			{ID: "Qwen/Qwen2.5-Coder-14B-Instruct", DisplayName: "Qwen2.5 Coder 14B (coding)", ContextWindow: 32768},
+			{ID: "Qwen/Qwen3-8B", DisplayName: "Qwen3 8B (reasoning + tools)", ContextWindow: 32768},
+			{ID: "meta-llama/Llama-3.1-8B-Instruct", DisplayName: "Llama 3.1 8B", ContextWindow: 131072},
 		},
 	}
 }

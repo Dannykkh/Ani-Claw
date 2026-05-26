@@ -320,9 +320,26 @@ func executeEditV2(input json.RawMessage, workDir string) (string, bool) {
 		}
 	}
 
+	// ── Lint gate ──
+	// If the file was syntactically valid before the edit, verify the edit
+	// didn't break it. A new syntax error rolls back the write and reports
+	// the error, which flows back to the model via the tool_result and the
+	// reflection loop in RunLoop, prompting a self-correcting retry.
+	preLintOK := lintFile(path) == "" // path still holds the original bytes
+
 	err = os.WriteFile(path, []byte(newContent), 0644)
 	if err != nil {
 		return fmt.Sprintf("Error writing %s: %v", args.FilePath, err), true
+	}
+
+	if preLintOK {
+		if lintErr := lintFile(path); lintErr != "" {
+			os.WriteFile(path, data, 0644) // roll back to original
+			return fmt.Sprintf(
+				"Your edit introduced a syntax error and was NOT applied:\n%s\n\n"+
+					"The file is unchanged. Fix your edit and try again. "+
+					"Do NOT repeat the same failed edit.", strings.TrimSpace(lintErr)), true
+		}
 	}
 
 	if count == 1 {
@@ -344,15 +361,34 @@ func executeWriteV2(input json.RawMessage, workDir string) (string, bool) {
 	dir := filepath.Dir(path)
 	os.MkdirAll(dir, 0755)
 
-	// Check if file exists for status message
+	// Check if file exists; keep a backup for the lint-gate rollback.
 	existed := false
-	if _, err := os.Stat(path); err == nil {
+	var backup []byte
+	if d, err := os.ReadFile(path); err == nil {
 		existed = true
+		backup = d
 	}
+	// Gate only when we have a clean baseline: a brand-new file, or an
+	// existing file that was already syntactically valid.
+	preLintOK := !existed || lintFile(path) == ""
 
 	err := os.WriteFile(path, []byte(args.Content), 0644)
 	if err != nil {
 		return fmt.Sprintf("Error writing %s: %v", args.FilePath, err), true
+	}
+
+	if preLintOK {
+		if lintErr := lintFile(path); lintErr != "" {
+			if existed {
+				os.WriteFile(path, backup, 0644) // roll back to original
+			} else {
+				os.Remove(path) // remove the newly-created broken file
+			}
+			return fmt.Sprintf(
+				"Your write introduced a syntax error and was NOT applied:\n%s\n\n"+
+					"Fix the content and try again. "+
+					"Do NOT repeat the same failed write.", strings.TrimSpace(lintErr)), true
+		}
 	}
 
 	lines := len(strings.Split(args.Content, "\n"))
