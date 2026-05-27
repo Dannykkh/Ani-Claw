@@ -307,16 +307,28 @@ func executeEditV2(input json.RawMessage, workDir string) (string, bool) {
 			count = 1
 		}
 	} else {
-		if !strings.Contains(content, args.OldString) {
-			return "Error: old_string not found in file. Make sure it matches exactly (including whitespace).", true
-		}
-
-		if args.ReplaceAll {
-			count = strings.Count(content, args.OldString)
-			newContent = strings.ReplaceAll(content, args.OldString, args.NewString)
-		} else {
-			count = 1
-			newContent = strings.Replace(content, args.OldString, args.NewString, 1)
+		switch {
+		case strings.Contains(content, args.OldString):
+			if args.ReplaceAll {
+				count = strings.Count(content, args.OldString)
+				newContent = strings.ReplaceAll(content, args.OldString, args.NewString)
+			} else {
+				count = 1
+				newContent = strings.Replace(content, args.OldString, args.NewString, 1)
+			}
+		default:
+			// Exact match failed — try a whitespace-insensitive (fuzzy) match
+			// so small indentation/trailing-space differences in the model's
+			// quoted text don't block the edit (Aider-style input tolerance).
+			if result, ok := fuzzyReplace(content, args.OldString, args.NewString); ok {
+				count = 1
+				newContent = result
+			} else {
+				return fmt.Sprintf(
+					"Error: old_string not found in %s (exact and whitespace-insensitive "+
+						"match both failed).%s\nRe-read the file and copy the exact text to replace.",
+					args.FilePath, closestLinesHint(content, args.OldString)), true
+			}
 		}
 	}
 
