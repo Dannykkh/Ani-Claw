@@ -65,6 +65,12 @@ func RunLoop(
 
 	maxIterations := 25
 
+	// Reflection guard: stop if the model keeps producing tool calls that all
+	// fail for several rounds in a row (e.g. repeating an edit the lint gate
+	// rejects). Prevents burning iterations on a stuck self-correction loop.
+	consecutiveErrorRounds := 0
+	const maxErrorRounds = 3
+
 	// ── Hook system: load from project + skill source ──
 	hookRegistry := hooks.NewRegistry()
 	hookRegistry.Load(workDir, "") // "" = all sources
@@ -481,6 +487,25 @@ func RunLoop(
 			Content: mustJSON(toolResults),
 		})
 
+		// ── Reflection guard ──
+		// A round where every tool errored counts as a failed round; any
+		// success resets the counter. Too many failed rounds in a row means
+		// the model is stuck (e.g. repeating an edit the lint gate rejects),
+		// so stop instead of looping all the way to maxIterations.
+		if allToolsErrored(toolResults) {
+			consecutiveErrorRounds++
+		} else {
+			consecutiveErrorRounds = 0
+		}
+		if consecutiveErrorRounds >= maxErrorRounds {
+			eventCh <- Event{Type: "error", Data: fmt.Sprintf(
+				"Stopped after %d consecutive failed tool rounds — the model appears "+
+					"stuck repeating a failing action. Try rephrasing the request.",
+				consecutiveErrorRounds)}
+			hookRegistry.Execute(hooks.HookSessionEnd, map[string]string{"WORK_DIR": workDir})
+			return
+		}
+
 		eventCh <- Event{Type: "status", Data: fmt.Sprintf("Iteration %d/%d — %d tools executed", i+1, maxIterations, len(toolUses))}
 	}
 
@@ -493,6 +518,20 @@ type toolUseBlock struct {
 	Name     string
 	InputRaw string
 	Input    json.RawMessage
+}
+
+// allToolsErrored reports whether every tool result in a round is an error
+// (and there is at least one). Used by the reflection guard in RunLoop.
+func allToolsErrored(toolResults []map[string]interface{}) bool {
+	if len(toolResults) == 0 {
+		return false
+	}
+	for _, r := range toolResults {
+		if e, ok := r["is_error"].(bool); !ok || !e {
+			return false
+		}
+	}
+	return true
 }
 
 func truncateStr(s string, max int) string {
