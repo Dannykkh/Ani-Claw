@@ -12,14 +12,20 @@ import (
 	"github.com/aniclew/aniclew/internal/types"
 )
 
-const baseSystemPrompt = `You are AniClew, an expert coding assistant.
+const baseSystemPrompt = `You are AniClew, an expert coding agent. You act by CALLING TOOLS, not by describing actions.
+
+## Acting vs. talking (read this first)
+The ONLY way to change the filesystem, run code, or inspect the project is to emit a tool call. Writing code or commands in your reply text does NOTHING — no file is created, nothing runs.
+- When the user asks you to create/modify/run/check something, your response MUST contain a tool call. Do not answer with prose or a code block alone.
+- NEVER claim you "created", "wrote", "updated", or "ran" anything unless a tool call actually did it in this turn. Saying so without a tool call is a hallucination and is wrong.
+- Prefer acting over explaining. Make the tool call first; keep any prose short. After tools report success, give a brief confirmation of what the tools actually did.
+- If a task needs several steps, call tools across multiple turns until it is genuinely done.
 
 ## Tools: Bash, Read, Write, Edit, Glob, Grep, Git, LS, WebSearch, WebFetch, TaskCreate/Update/List, NotebookRead/Edit, Screenshot, MouseClick, TypeText, OpenApp, FileManager, Clipboard
 
 ## Rules
-- Read files BEFORE modifying them
+- To create a new file, call Write. To change an existing file, Read it first, then call Edit.
 - Use Glob/Grep to find files instead of guessing paths
-- Use Edit (not Write) to modify existing files
 - Run tests after changes when possible
 - For git: use Git tool (not Bash)
 - Keep changes minimal and focused
@@ -141,12 +147,23 @@ func RunLoop(
 		}
 	}
 
+	// Mention skills as a single pointer line — do NOT enumerate them and do
+	// NOT inline their content. Two separate failures were observed driving an
+	// open model (Qwen3 via Ollama/SGLang) and confirmed by replaying captured
+	// requests directly against the backend:
+	//   1. Inlining every SKILL.md balloons the prompt to ~700KB (~180K tokens),
+	//      overflowing a local model's ~32K context so it loses the task/tools.
+	//   2. Even a compact name+description index of ~100 skills SUPPRESSES tool
+	//      calling: the model reads the list as a menu and answers with prose
+	//      ("here is the code…") instead of emitting a tool_use — and then
+	//      hallucinates that it created the file. Dropping the enumeration and
+	//      keeping a one-line pointer restores reliable tool calls.
+	// Skills stay fully usable: the user invokes one with /<name> and
+	// ProcessSlashCommand (above) expands its full prompt before the LLM runs,
+	// so the model never needs to see the catalog to use it.
 	skillText := ""
 	if len(skills) > 0 {
-		skillText = "\n\n--- AVAILABLE SKILLS ---\n"
-		for _, s := range skills {
-			skillText += fmt.Sprintf("\n### Skill: %s\n%s\n", s.Name, s.Content)
-		}
+		skillText = fmt.Sprintf("\n\n## Skills\n%d task skills are available; the user invokes one by typing /<name>. Skills are not tools — never try to call them. Just do the work with the tools above.", len(skills))
 		eventCh <- Event{Type: "status", Data: fmt.Sprintf("Loaded %d skills", len(skills))}
 	}
 	if projectCtx != "" {

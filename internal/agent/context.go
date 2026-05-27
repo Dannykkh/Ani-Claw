@@ -170,6 +170,71 @@ func loadSkillsFromDir(dir string) []SkillInfo {
 	return skills
 }
 
+// SkillDescription extracts a one-line summary from a SKILL.md body so the
+// agent loop can advertise skills by name + description instead of inlining
+// every skill's full content. It prefers the YAML frontmatter `description:`
+// field, then falls back to the first non-empty, non-heading prose line.
+// The result is collapsed to a single line and truncated to keep the system
+// prompt small — critical for local models with a 32K-ish context window.
+func SkillDescription(content string) string {
+	const maxLen = 200
+
+	clean := func(s string) string {
+		s = strings.TrimSpace(s)
+		s = strings.Trim(s, "\"'")
+		s = strings.Join(strings.Fields(s), " ") // collapse whitespace/newlines
+		if len(s) > maxLen {
+			s = strings.TrimSpace(s[:maxLen]) + "…"
+		}
+		return s
+	}
+
+	lines := strings.Split(content, "\n")
+
+	// 1. YAML frontmatter `description:` (may be empty → multi-line block scalar)
+	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "---" {
+		for i := 1; i < len(lines); i++ {
+			line := strings.TrimSpace(lines[i])
+			if line == "---" {
+				break
+			}
+			if rest, ok := strings.CutPrefix(line, "description:"); ok {
+				// A bare block-scalar indicator (|, >, |-, >+, …) is not the
+				// description itself — fall through to read the indented block.
+				trimmed := strings.TrimSpace(rest)
+				isBlockScalar := trimmed != "" && (trimmed[0] == '|' || trimmed[0] == '>')
+				if v := clean(rest); v != "" && !isBlockScalar {
+					return v
+				}
+				// Block scalar (description: | or >): take following indented lines.
+				var block []string
+				for j := i + 1; j < len(lines); j++ {
+					l := lines[j]
+					if strings.TrimSpace(l) == "---" || (l != "" && !strings.HasPrefix(l, " ") && !strings.HasPrefix(l, "\t")) {
+						break
+					}
+					block = append(block, strings.TrimSpace(l))
+				}
+				if v := clean(strings.Join(block, " ")); v != "" {
+					return v
+				}
+			}
+		}
+	}
+
+	// 2. First non-empty, non-heading, non-frontmatter prose line.
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if t == "" || t == "---" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if v := clean(t); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // LoadMCPConfig reads MCP configuration from multiple sources.
 // Priority: .mcp.json > .claude/settings.json > ~/.claude/settings.json
 func LoadMCPConfig(workDir string) string {
