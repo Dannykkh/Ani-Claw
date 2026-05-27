@@ -8,9 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"syscall"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/aniclew/aniclew/internal/agent"
@@ -21,6 +21,7 @@ import (
 	"github.com/aniclew/aniclew/internal/providers"
 	"github.com/aniclew/aniclew/internal/router"
 	"github.com/aniclew/aniclew/internal/server"
+	"github.com/aniclew/aniclew/internal/translate"
 	"github.com/aniclew/aniclew/internal/types"
 )
 
@@ -88,7 +89,10 @@ func main() {
 		// Skip built-in provider names
 		isBuiltin := false
 		for _, b := range []string{"anthropic", "openai", "gemini", "groq", "ollama", "github-copilot", "zai"} {
-			if name == b { isBuiltin = true; break }
+			if name == b {
+				isBuiltin = true
+				break
+			}
 		}
 		if !isBuiltin && settings.BaseURL != "" {
 			providers.RegisterCustomProvider(name, &types.ProviderConfig{
@@ -145,6 +149,9 @@ func main() {
 	fmt.Fprintf(os.Stderr, "  Router:    %s\n", routerStatus)
 	if agent.OfflineMode() {
 		fmt.Fprintf(os.Stderr, "  Network:   AIR-GAP (ANICLEW_OFFLINE) — WebSearch/WebFetch/HTTPRequest disabled\n")
+	}
+	if budget := translate.ToolBudget(); budget > 0 {
+		fmt.Fprintf(os.Stderr, "  Tools:     budget %d (ANICLEW_MAX_TOOLS) — large tool lists pruned for weak models\n", budget)
 	}
 	fmt.Fprintf(os.Stderr, "\n")
 	fmt.Fprintf(os.Stderr, "  Usage:\n")
