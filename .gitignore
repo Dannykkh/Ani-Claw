@@ -1,8 +1,10 @@
 # Binaries
+# Leading slash anchors these to the repo root so the compiled `aniclew`/`proxy`
+# binaries are ignored without also ignoring the cmd/proxy/ source directory.
 *.exe
 *.exe~
-aniclew
-proxy
+/aniclew
+/proxy
 dist/
 
 # Dependencies
