@@ -26,6 +26,13 @@ import (
 )
 
 func main() {
+	// Subcommand: `aniclew chat` runs the built-in terminal client (connects to
+	// a running server's /api/agent). Everything else starts the server.
+	if len(os.Args) > 1 && os.Args[1] == "chat" {
+		runChat(os.Args[2:])
+		return
+	}
+
 	providerName := flag.String("provider", "", "Provider name")
 	model := flag.String("model", "", "Model ID")
 	port := flag.Int("port", 0, "Listen port (default 4000)")
