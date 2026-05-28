@@ -68,33 +68,33 @@ export function SettingsPage() {
         <h2 className="text-lg font-semibold mb-3">Quick Start</h2>
         <div className="grid grid-cols-3 gap-3">
           <button
-            onClick={() => quickStart('ollama', 'qwen3:14b')}
+            onClick={() => quickStart('ollama', 'qwen3:8b')}
             className={`p-4 rounded-xl border text-left transition-all hover:border-[var(--color-accent)] ${config?.provider === 'ollama' ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10' : 'border-[var(--color-border)] bg-[var(--color-surface)]'}`}
           >
             <div className="text-2xl mb-2">🏠</div>
             <div className="text-sm font-semibold">Local (Ollama)</div>
             <div className="text-[10px] text-[var(--color-text2)] mt-1">Free, private, no API key</div>
-            <div className="text-[9px] text-[var(--color-accent)] mt-2">qwen3:14b</div>
+            <div className="text-[9px] text-[var(--color-accent)] mt-2">qwen3:8b (fast)</div>
           </button>
 
           <button
-            onClick={() => { setSelProvider('openai'); setSelModel('gpt-4o-mini'); setShowAdvanced(false); }}
+            onClick={() => { setSelProvider('openai'); setSelModel('gpt-5.4-mini'); setShowAdvanced(false); }}
             className={`p-4 rounded-xl border text-left transition-all hover:border-[var(--color-accent)] ${config?.provider === 'openai' ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10' : 'border-[var(--color-border)] bg-[var(--color-surface)]'}`}
           >
             <div className="text-2xl mb-2">🟢</div>
             <div className="text-sm font-semibold">OpenAI</div>
             <div className="text-[10px] text-[var(--color-text2)] mt-1">API key needed</div>
-            <div className="text-[9px] text-[var(--color-accent)] mt-2">GPT-4o / o4</div>
+            <div className="text-[9px] text-[var(--color-accent)] mt-2">GPT-5.4 / o4</div>
           </button>
 
           <button
-            onClick={() => { setSelProvider('anthropic'); setSelModel('claude-sonnet-4-6-20250217'); setShowAdvanced(false); }}
+            onClick={() => { setSelProvider('anthropic'); setSelModel('claude-sonnet-4-6'); setShowAdvanced(false); }}
             className={`p-4 rounded-xl border text-left transition-all hover:border-[var(--color-accent)] ${config?.provider === 'anthropic' ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10' : 'border-[var(--color-border)] bg-[var(--color-surface)]'}`}
           >
             <div className="text-2xl mb-2">🟠</div>
             <div className="text-sm font-semibold">Anthropic</div>
             <div className="text-[10px] text-[var(--color-text2)] mt-1">API key needed</div>
-            <div className="text-[9px] text-[var(--color-accent)] mt-2">Claude Sonnet/Opus</div>
+            <div className="text-[9px] text-[var(--color-accent)] mt-2">Claude Opus 4.7 / Sonnet 4.6</div>
           </button>
         </div>
       </div>
