@@ -32,7 +32,7 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
 
   // Load session list
   useEffect(() => {
-    listSessions().then(setSessions).catch(() => {});
+    listSessions().then((s) => setSessions(s || [])).catch(() => setSessions([]));
   }, []);
 
   // Handle session load/new from SidePanel
@@ -66,7 +66,7 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
     if (result.id && !sid) {
       setSessionId(result.id);
     }
-    listSessions().then(setSessions).catch(() => {});
+    listSessions().then((s) => setSessions(s || [])).catch(() => setSessions([]));
   }, []);
 
   const loadSession = async (id: string) => {

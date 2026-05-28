@@ -124,10 +124,13 @@ func (s *SessionStore) List(workspace string) []SessionSummary {
 	dir := s.workspaceDir(workspace)
 	files, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		// Always return a non-nil slice — encoding/json emits `null` for a nil
+		// slice, which crashes a frontend that does `sessions.length` after
+		// switching to a workspace with no session history yet.
+		return []SessionSummary{}
 	}
 
-	var sessions []SessionSummary
+	sessions := []SessionSummary{}
 	for _, f := range files {
 		if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
 			continue
@@ -175,7 +178,7 @@ func (s *SessionStore) List(workspace string) []SessionSummary {
 // ListAll returns all sessions across all workspaces.
 func (s *SessionStore) ListAll() []SessionSummary {
 	workspaces := s.ListWorkspaces()
-	var all []SessionSummary
+	all := []SessionSummary{} // non-nil for JSON `[]` rather than `null`
 	for _, ws := range workspaces {
 		all = append(all, s.List(ws.Path)...)
 	}

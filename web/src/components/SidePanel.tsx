@@ -111,7 +111,10 @@ export function SidePanel({ visible, mode, onFileClick, onSessionClick, onNewCha
 
   async function loadSessions() {
     const ws = (await fetchJSON<any>('/api/workspace').catch(() => null))?.path;
-    listSessions(ws || undefined).then(setSessions).catch(() => {});
+    // Backend returns `null` (not `[]`) for a workspace with no sessions;
+    // unwrapped that bypasses the [] default and makes render crash on
+    // `sessions.length`. Coerce here defensively in addition to the backend fix.
+    listSessions(ws || undefined).then((s) => setSessions(s || [])).catch(() => setSessions([]));
   }
 
   async function loadFileTree() {

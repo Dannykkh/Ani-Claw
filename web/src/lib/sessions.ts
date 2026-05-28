@@ -33,7 +33,10 @@ export interface Session {
 
 export async function listSessions(workspace?: string): Promise<SessionSummary[]> {
   const params = workspace ? `?workspace=${encodeURIComponent(workspace)}` : '';
-  return fetchJSON(`/api/sessions${params}`);
+  // Backend returns JSON `null` for an empty workspace; the typed return is
+  // an array, so coerce once here for every caller.
+  const data = await fetchJSON<SessionSummary[] | null>(`/api/sessions${params}`);
+  return data ?? [];
 }
 
 export async function getSession(id: string): Promise<Session> {
