@@ -1,0 +1,330 @@
+//go:build windows
+
+package tray
+
+// Pure-syscall Windows system tray icon. No CGO, no external dependency —
+// AniClew stays a single static binary, and the air-gap (linux/headless) build
+// is untouched by build tags.
+//
+// What it does:
+//   - Creates a hidden message-only window.
+//   - Adds a tray icon (Shell_NotifyIcon) tied to that window.
+//   - On left or right click, pops a menu: "Open Dashboard" and "Quit AniClew".
+//   - Invokes the caller-supplied onOpen / onQuit callbacks.
+//   - Stop() posts WM_CLOSE so the message loop exits and the icon is removed.
+
+import (
+	"fmt"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"unsafe"
+)
+
+const (
+	// Window messages
+	wmDestroy = 0x0002
+	wmClose   = 0x0010
+	wmCommand = 0x0111
+	wmRBtnUp  = 0x0205
+	wmLBtnUp  = 0x0202
+	wmUser    = 0x0400
+	wmTrayCB  = wmUser + 1 // our private tray callback id
+
+	// Shell_NotifyIcon
+	nimAdd     = 0x00000000
+	nimModify  = 0x00000001
+	nimDelete  = 0x00000002
+	nifMessage = 0x00000001
+	nifIcon    = 0x00000002
+	nifTip     = 0x00000004
+
+	// Resource ids
+	idiApplication = 32512
+	idcArrow       = 32512
+
+	// Menu flags
+	mfString    = 0x00000000
+	mfSeparator = 0x00000800
+
+	// TrackPopupMenu
+	tpmRightButton = 0x0002
+
+	// Menu item ids
+	menuOpenID = 1001
+	menuQuitID = 1002
+)
+
+// HWND_MESSAGE = (HWND)-3 — creates a message-only window (no display).
+var hwndMessage = ^uintptr(2)
+
+// Win32 structs — field order/sizes must match the C definitions exactly.
+
+type wndclassexw struct {
+	cbSize        uint32
+	style         uint32
+	lpfnWndProc   uintptr
+	cbClsExtra    int32
+	cbWndExtra    int32
+	hInstance     uintptr
+	hIcon         uintptr
+	hCursor       uintptr
+	hbrBackground uintptr
+	lpszMenuName  *uint16
+	lpszClassName *uint16
+	hIconSm       uintptr
+}
+
+type point struct {
+	X, Y int32
+}
+
+type msgT struct {
+	HWnd     uintptr
+	Message  uint32
+	WParam   uintptr
+	LParam   uintptr
+	Time     uint32
+	Pt       point
+	LPrivate uint32
+}
+
+type notifyIconData struct {
+	cbSize           uint32
+	hWnd             uintptr
+	uID              uint32
+	uFlags           uint32
+	uCallbackMessage uint32
+	hIcon            uintptr
+	szTip            [128]uint16
+	dwState          uint32
+	dwStateMask      uint32
+	szInfo           [256]uint16
+	uVersion         uint32 // union with uTimeout (we use uVersion=0)
+	szInfoTitle      [64]uint16
+	dwInfoFlags      uint32
+	guidItem         [16]byte
+	hBalloonIcon     uintptr
+}
+
+// Lazy DLL bindings — loaded on first call, no init cost when tray is unused.
+
+var (
+	kernel32 = syscall.NewLazyDLL("kernel32.dll")
+	user32   = syscall.NewLazyDLL("user32.dll")
+	shell32  = syscall.NewLazyDLL("shell32.dll")
+
+	procGetModuleHandle     = kernel32.NewProc("GetModuleHandleW")
+	procRegisterClassEx     = user32.NewProc("RegisterClassExW")
+	procCreateWindowEx      = user32.NewProc("CreateWindowExW")
+	procDefWindowProc       = user32.NewProc("DefWindowProcW")
+	procGetMessage          = user32.NewProc("GetMessageW")
+	procTranslateMessage    = user32.NewProc("TranslateMessage")
+	procDispatchMessage     = user32.NewProc("DispatchMessageW")
+	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
+	procPostMessage         = user32.NewProc("PostMessageW")
+	procLoadIcon            = user32.NewProc("LoadIconW")
+	procLoadCursor          = user32.NewProc("LoadCursorW")
+	procCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
+	procAppendMenu          = user32.NewProc("AppendMenuW")
+	procDestroyMenu         = user32.NewProc("DestroyMenu")
+	procTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
+	procGetCursorPos        = user32.NewProc("GetCursorPos")
+	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
+	procDestroyWindow       = user32.NewProc("DestroyWindow")
+	procShellNotifyIcon     = shell32.NewProc("Shell_NotifyIconW")
+)
+
+// runtime state — accessed from the WndProc callback and Run/Stop.
+
+var (
+	stateMu sync.Mutex
+	started atomic.Bool
+	active  atomic.Bool
+	hwnd    atomic.Uintptr
+	onOpen  func()
+	onQuit  func()
+)
+
+// Run starts the tray icon and blocks until initialization succeeds or fails;
+// the message loop then runs in its own OS-locked goroutine. onOpen/onQuit are
+// invoked off-thread so they cannot block the message loop. Safe to call once;
+// subsequent calls are no-ops returning nil.
+func Run(port int, openCb, quitCb func()) error {
+	if !started.CompareAndSwap(false, true) {
+		return nil
+	}
+	stateMu.Lock()
+	onOpen = openCb
+	onQuit = quitCb
+	stateMu.Unlock()
+
+	errCh := make(chan error, 1)
+	go runLoop(port, errCh)
+	err := <-errCh // wait for init to report
+	if err == nil {
+		active.Store(true)
+	}
+	return err
+}
+
+// Active reports whether the tray icon is currently installed. True only after
+// Run has successfully created the icon (always false on non-Windows).
+func Active() bool { return active.Load() }
+
+// Stop removes the tray icon and exits the message loop. Idempotent.
+func Stop() {
+	h := hwnd.Load()
+	if h == 0 {
+		return
+	}
+	procPostMessage.Call(h, wmClose, 0, 0)
+}
+
+func runLoop(port int, errCh chan<- error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	hInst, _, _ := procGetModuleHandle.Call(0)
+	className, _ := syscall.UTF16PtrFromString("AniClewTrayWnd")
+	hCursor, _, _ := procLoadCursor.Call(0, uintptr(idcArrow))
+
+	wcx := wndclassexw{
+		style:         0,
+		lpfnWndProc:   syscall.NewCallback(wndProc),
+		hInstance:     hInst,
+		hCursor:       hCursor,
+		lpszClassName: className,
+	}
+	wcx.cbSize = uint32(unsafe.Sizeof(wcx))
+
+	atom, _, err := procRegisterClassEx.Call(uintptr(unsafe.Pointer(&wcx)))
+	if atom == 0 {
+		errCh <- fmt.Errorf("RegisterClassEx: %v", err)
+		return
+	}
+
+	winTitle, _ := syscall.UTF16PtrFromString("AniClew")
+	hw, _, err := procCreateWindowEx.Call(
+		0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(winTitle)),
+		0, 0, 0, 0, 0, hwndMessage, 0, hInst, 0,
+	)
+	if hw == 0 {
+		errCh <- fmt.Errorf("CreateWindowEx: %v", err)
+		return
+	}
+	hwnd.Store(hw)
+
+	hIcon, _, _ := procLoadIcon.Call(0, uintptr(idiApplication))
+
+	var nid notifyIconData
+	nid.cbSize = uint32(unsafe.Sizeof(nid))
+	nid.hWnd = hw
+	nid.uID = 1
+	nid.uFlags = nifMessage | nifIcon | nifTip
+	nid.uCallbackMessage = wmTrayCB
+	nid.hIcon = hIcon
+	tip := fmt.Sprintf("AniClew — http://localhost:%d", port)
+	copyToUTF16(nid.szTip[:], tip)
+
+	if r, _, _ := procShellNotifyIcon.Call(nimAdd, uintptr(unsafe.Pointer(&nid))); r == 0 {
+		procDestroyWindow.Call(hw)
+		errCh <- fmt.Errorf("Shell_NotifyIcon ADD failed")
+		return
+	}
+	errCh <- nil // started OK
+
+	// Message loop — runs until WM_QUIT (posted by PostQuitMessage on WM_DESTROY).
+	var m msgT
+	for {
+		r, _, _ := procGetMessage.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
+		if int32(r) <= 0 {
+			break
+		}
+		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
+		procDispatchMessage.Call(uintptr(unsafe.Pointer(&m)))
+	}
+
+	// Remove the icon explicitly — otherwise a ghost icon can linger until the
+	// user moves the mouse over the tray.
+	procShellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(&nid)))
+	hwnd.Store(0)
+	active.Store(false)
+}
+
+func wndProc(hw, msg, wparam, lparam uintptr) uintptr {
+	switch uint32(msg) {
+	case wmTrayCB:
+		ev := uint32(lparam) & 0xFFFF
+		if ev == wmRBtnUp || ev == wmLBtnUp {
+			showMenu(hw)
+		}
+		return 0
+
+	case wmCommand:
+		id := uint32(wparam) & 0xFFFF
+		stateMu.Lock()
+		open, quit := onOpen, onQuit
+		stateMu.Unlock()
+		switch id {
+		case menuOpenID:
+			if open != nil {
+				go open()
+			}
+		case menuQuitID:
+			if quit != nil {
+				go quit()
+			}
+			// Also tear down the tray window — quit handler triggers server
+			// shutdown which calls Stop(), but posting WM_CLOSE here makes the
+			// icon disappear immediately for snappier UX.
+			procPostMessage.Call(hw, wmClose, 0, 0)
+		}
+		return 0
+
+	case wmClose:
+		procDestroyWindow.Call(hw)
+		return 0
+
+	case wmDestroy:
+		procPostQuitMessage.Call(0)
+		return 0
+	}
+	r, _, _ := procDefWindowProc.Call(hw, msg, wparam, lparam)
+	return r
+}
+
+func showMenu(hw uintptr) {
+	menu, _, _ := procCreatePopupMenu.Call()
+	if menu == 0 {
+		return
+	}
+	defer procDestroyMenu.Call(menu)
+
+	openLbl, _ := syscall.UTF16PtrFromString("Open Dashboard")
+	quitLbl, _ := syscall.UTF16PtrFromString("Quit AniClew")
+	procAppendMenu.Call(menu, mfString, uintptr(menuOpenID), uintptr(unsafe.Pointer(openLbl)))
+	procAppendMenu.Call(menu, mfSeparator, 0, 0)
+	procAppendMenu.Call(menu, mfString, uintptr(menuQuitID), uintptr(unsafe.Pointer(quitLbl)))
+
+	var pt point
+	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+	// Required Win32 dance so the menu dismisses when the user clicks elsewhere.
+	procSetForegroundWindow.Call(hw)
+	procTrackPopupMenu.Call(menu, tpmRightButton, uintptr(pt.X), uintptr(pt.Y), 0, hw, 0)
+}
+
+// copyToUTF16 writes s into dst as null-terminated UTF-16, truncating if needed
+// so we never overrun a fixed-size Win32 buffer (Tip is [128]uint16).
+func copyToUTF16(dst []uint16, s string) {
+	enc := syscall.StringToUTF16(s)
+	n := len(enc)
+	if n > len(dst) {
+		n = len(dst)
+		dst[n-1] = 0 // ensure NUL terminator
+		copy(dst[:n-1], enc[:n-1])
+		return
+	}
+	copy(dst[:n], enc)
+}

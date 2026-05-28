@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"time"
 
@@ -22,6 +20,7 @@ import (
 	"github.com/aniclew/aniclew/internal/router"
 	"github.com/aniclew/aniclew/internal/server"
 	"github.com/aniclew/aniclew/internal/translate"
+	"github.com/aniclew/aniclew/internal/tray"
 	"github.com/aniclew/aniclew/internal/types"
 )
 
@@ -165,24 +164,30 @@ func main() {
 	fmt.Fprintf(os.Stderr, "    ANTHROPIC_BASE_URL=http://localhost:%d claude\n", *port)
 	fmt.Fprintf(os.Stderr, "\n")
 
-	// Auto-open browser
-	go func() {
-		url := fmt.Sprintf("http://localhost:%d/app", *port)
-		var cmd *exec.Cmd
-		switch runtime.GOOS {
-		case "windows":
-			cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-		case "darwin":
-			cmd = exec.Command("open", url)
-		default:
-			cmd = exec.Command("xdg-open", url)
-		}
-		cmd.Run()
-	}()
-
-	// Graceful shutdown
+	// Graceful shutdown channel — wired to OS signals AND the tray Quit menu so
+	// the user can stop the server from either place and we run the same drain.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+	// Auto-open the dashboard once on startup.
+	go tray.OpenBrowser(*port)
+
+	// System tray icon (Windows only; no-op elsewhere). Right-click → Open
+	// Dashboard / Quit AniClew. Quit pushes os.Interrupt into sigCh so the
+	// existing graceful drain path handles tear-down.
+	if err := tray.Run(*port,
+		func() { tray.OpenBrowser(*port) },
+		func() {
+			select {
+			case sigCh <- os.Interrupt:
+			default:
+			}
+		},
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "  Tray:      unavailable (%v)\n", err)
+	} else if tray.Active() {
+		fmt.Fprintf(os.Stderr, "  Tray:      enabled (right-click for menu)\n")
+	}
 
 	go func() {
 		if err := srv.Start(); err != nil {
@@ -192,6 +197,7 @@ func main() {
 
 	<-sigCh
 	fmt.Fprintf(os.Stderr, "\n  Shutting down...\n")
+	tray.Stop()
 
 	// Drain order matters:
 	//   1. Stop accepting new agent loops and cancel live ones, bounded
