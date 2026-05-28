@@ -2,6 +2,21 @@ import { useState, useEffect } from 'react';
 import { fetchJSON, postJSON } from '../lib/api';
 import { getLang } from '../lib/i18n';
 import { listSessions, type SessionSummary } from '../lib/sessions';
+import { showToast } from './Toast';
+
+// parentPath returns the parent of a filesystem path, handling Windows drive
+// roots correctly: `D:/git` -> `D:/`, NOT `D:` (which Windows treats as the
+// drive's current directory, not the drive root — exactly the bug that made
+// the Up button jump to a "weird" location).
+function parentPath(p: string): string {
+  const norm = p.replace(/\\/g, '/').replace(/\/+$/, '');
+  const idx = norm.lastIndexOf('/');
+  if (idx < 0) return norm; // no separator left — already at top
+  let parent = norm.slice(0, idx);
+  if (/^[A-Za-z]:$/.test(parent)) parent += '/'; // Windows drive: keep the slash
+  if (parent === '') return '/';                 // unix root
+  return parent;
+}
 
 interface ProjectInfo {
   path: string;
@@ -114,26 +129,37 @@ export function SidePanel({ visible, mode, onFileClick, onSessionClick, onNewCha
   }
 
   async function switchProject(path: string) {
-    await fetchJSON('/api/workspace', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path }),
-    });
-    await loadProjects();
-    loadSessions();
-    loadFileTree();
-    setShowProjectList(false);
-    onProjectSwitch?.(path);
+    try {
+      await fetchJSON('/api/workspace', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      await loadProjects();
+      loadSessions();
+      loadFileTree();
+      setShowProjectList(false);
+      onProjectSwitch?.(path);
+    } catch (e: any) {
+      showToast(e?.message || (ko ? '프로젝트 전환 실패' : 'Failed to switch project'), 'error');
+    }
   }
 
   async function addProject(path: string) {
-    await postJSON('/api/projects', { path });
-    await loadProjects();
-    loadSessions();
-    loadFileTree();
-    setShowAddProject(false);
-    setShowProjectList(false);
-    onProjectSwitch?.(path);
+    try {
+      await postJSON('/api/projects', { path });
+      await loadProjects();
+      loadSessions();
+      loadFileTree();
+      setShowAddProject(false);
+      setShowProjectList(false);
+      onProjectSwitch?.(path);
+      showToast(ko ? `프로젝트 추가됨: ${path}` : `Project added: ${path}`, 'success');
+    } catch (e: any) {
+      // Most common: 409 "Project already exists" → tell the user instead of
+      // closing the menu silently like before.
+      showToast(e?.message || (ko ? '프로젝트 추가 실패' : 'Failed to add project'), 'error');
+    }
   }
 
   async function removeProject(path: string, e: React.MouseEvent) {
@@ -235,10 +261,7 @@ export function SidePanel({ visible, mode, onFileClick, onSessionClick, onNewCha
             </div>
             <div className="px-2 py-1 flex gap-1">
               <button
-                onClick={() => {
-                  const parent = browsePath.replace(/[/\\][^/\\]+$/, '');
-                  loadBrowse(parent);
-                }}
+                onClick={() => loadBrowse(parentPath(browsePath))}
                 className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--color-surface2)] hover:bg-[var(--color-border)] transition-colors"
               >
                 ↑ {ko ? '상위' : 'Up'}
@@ -251,24 +274,28 @@ export function SidePanel({ visible, mode, onFileClick, onSessionClick, onNewCha
               </button>
             </div>
             <div className="py-1">
-              {browseEntries.filter((e: any) => e.isDir).map((entry: any) => (
-                <div
-                  key={entry.name}
-                  onClick={() => loadBrowse(browsePath.replace(/\\/g, '/') + '/' + entry.name)}
-                  className="flex items-center gap-1.5 px-3 py-1 text-xs cursor-pointer hover:bg-[var(--color-surface2)] transition-colors"
-                >
-                  <span className="text-[10px]">▸</span>
-                  <span className={`truncate ${entry.isProject ? 'text-[var(--color-accent)]' : ''}`}>{entry.name}</span>
-                  {entry.isProject && (
+              {browseEntries.filter((e: any) => e.isDir).map((entry: any) => {
+                const childPath = browsePath.replace(/\\/g, '/').replace(/\/+$/, '') + '/' + entry.name;
+                return (
+                  <div
+                    key={entry.name}
+                    onClick={() => loadBrowse(childPath)}
+                    className="flex items-center gap-1.5 px-3 py-1 text-xs cursor-pointer hover:bg-[var(--color-surface2)] transition-colors group"
+                  >
+                    <span className="text-[10px]">▸</span>
+                    <span className={`truncate flex-1 ${entry.isProject ? 'text-[var(--color-accent)]' : ''}`}>{entry.name}</span>
+                    {entry.isProject && (
+                      <span className="text-[9px] text-[var(--color-accent)] shrink-0" title={ko ? '감지된 프로젝트' : 'detected project'}>•</span>
+                    )}
                     <button
-                      onClick={(e) => { e.stopPropagation(); addProject(browsePath.replace(/\\/g, '/') + '/' + entry.name); }}
-                      className="ml-auto text-[9px] bg-[var(--color-accent)] text-white px-1.5 py-0.5 rounded hover:opacity-80 shrink-0"
+                      onClick={(e) => { e.stopPropagation(); addProject(childPath); }}
+                      className="ml-auto text-[9px] bg-[var(--color-accent)] text-white px-1.5 py-0.5 rounded hover:opacity-80 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
                     >
                       + {ko ? '추가' : 'Add'}
                     </button>
-                  )}
-                </div>
-              ))}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

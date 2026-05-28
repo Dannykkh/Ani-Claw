@@ -2,6 +2,23 @@ const BASE = '';
 
 export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + url, init);
+  if (!res.ok) {
+    // Surface server errors as exceptions so callers can show a toast instead
+    // of silently treating the error body as a successful result. The server's
+    // writeError shape is `{ error: { message }, type }`; we also tolerate
+    // plain `{ message }` and bare text.
+    let msg = `HTTP ${res.status}`;
+    try {
+      const body: any = await res.json();
+      msg = body?.error?.message || body?.message || msg;
+    } catch {
+      try {
+        const text = await res.text();
+        if (text) msg = text;
+      } catch { /* keep msg */ }
+    }
+    throw new Error(msg);
+  }
   return res.json();
 }
 
