@@ -110,19 +110,51 @@ func CheckPath(path string, workDir string, cfg PermissionConfig) (bool, string)
 		}
 	}
 
-	// Block path traversal outside workDir
-	absPath, err := filepath.Abs(path)
-	if err == nil {
-		absWork, _ := filepath.Abs(workDir)
-		if !strings.HasPrefix(absPath, absWork) {
-			// Allow home directory and /tmp
-			if !strings.HasPrefix(absPath, "/tmp") && !strings.Contains(absPath, ".claude-proxy") {
-				return false, "Path outside workspace: " + path
-			}
-		}
+	// Resolve the path the way the tools do: a relative path is joined with the
+	// agent's workDir, NOT the server process's working directory. Previously
+	// this used filepath.Abs(path) directly, which resolved a bare filename like
+	// "notes.txt" against the server's cwd and falsely reported it as outside
+	// the workspace — so the agent could never Write/Edit with a relative path.
+	resolved := path
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(workDir, resolved)
+	}
+	absPath, err := filepath.Abs(resolved)
+	if err != nil {
+		return true, "" // unresolvable — defer to the tool's own handling
 	}
 
-	return true, ""
+	// Inside the workspace → always allowed.
+	if absWork, werr := filepath.Abs(workDir); werr == nil && pathWithin(absPath, absWork) {
+		return true, ""
+	}
+
+	// Outside the workspace: still allow the same known-safe areas the original
+	// check did — unix /tmp and the AniClew config dir (~/.claude-proxy). We do
+	// NOT broaden this to the OS temp dir: that would loosen the boundary
+	// whenever the workspace itself lives under temp (common in tests/CI).
+	if absTmp, terr := filepath.Abs("/tmp"); terr == nil && pathWithin(absPath, absTmp) {
+		return true, ""
+	}
+	if strings.Contains(absPath, ".claude-proxy") {
+		return true, ""
+	}
+
+	return false, "Path outside workspace: " + path
+}
+
+// pathWithin reports whether target is base, or lives under it, using path
+// semantics — so "/work-evil" is NOT considered within "/work" (a plain string
+// prefix check would wrongly accept it).
+func pathWithin(target, base string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // CheckPermission determines if a tool call should be allowed.
