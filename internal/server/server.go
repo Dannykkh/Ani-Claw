@@ -276,8 +276,16 @@ func (s *Server) Start() error {
 	mux.HandleFunc("GET /", s.handleRoot)
 
 	handler := corsMiddleware(authMiddleware(mux))
-	addr := fmt.Sprintf(":%d", s.port)
-	log.Printf("Server listening on http://localhost:%d", s.port)
+	// Default to loopback only — a dev box running AniClew should not be
+	// reachable from the LAN by default (the agent has Bash/Write/Edit and
+	// auth is optional). Set ANICLEW_BIND=0.0.0.0 to open to other hosts
+	// (e.g. a server in a closed network used by other machines).
+	host := strings.TrimSpace(os.Getenv("ANICLEW_BIND"))
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	addr := fmt.Sprintf("%s:%d", host, s.port)
+	log.Printf("Server listening on http://%s:%d (bind: %s)", host, s.port, host)
 	return http.ListenAndServe(addr, handler)
 }
 
