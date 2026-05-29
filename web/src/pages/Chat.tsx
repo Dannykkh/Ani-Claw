@@ -34,6 +34,7 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
   const [elapsed, setElapsed] = useState(0);
   const [genChars, setGenChars] = useState(0);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -138,11 +139,18 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
 
     setAttachedImage(null); // clear after sending
 
+    // Abort controller so the user can interrupt a slow generation; aborting
+    // the fetch cancels the request context, which propagates to RunLoop and
+    // stops the provider stream server-side.
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
       const res = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: apiMessages }),
+        signal: controller.signal,
       });
 
       const reader = res.body!.getReader();
@@ -164,17 +172,20 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
         }
       }
     } catch (err) {
+      const aborted = err instanceof DOMException && err.name === 'AbortError';
       setMessages((prev) => {
         const updated = [...prev];
         const last = updated[updated.length - 1];
         if (last?.role === 'assistant') {
-          updated[updated.length - 1] = { ...last, content: last.content + `\n\n[Error: ${err}]` };
+          const note = aborted ? '\n\n_(stopped)_' : `\n\n[Error: ${err}]`;
+          updated[updated.length - 1] = { ...last, content: last.content + note };
         }
         return updated;
       });
     } finally {
       setStreaming(false);
       setStatus('');
+      abortRef.current = null;
       if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
       inputRef.current?.focus();
       // Auto-save after response complete
@@ -477,7 +488,10 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+                  else if (e.key === 'Escape' && streaming) { e.preventDefault(); abortRef.current?.abort(); }
+                }}
                 onPaste={(e) => {
                   const items = e.clipboardData?.items;
                   if (!items) return;
@@ -521,13 +535,24 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
                 🔊
               </button>
 
-              <button
-                onClick={send}
-                disabled={streaming || (!input.trim() && !attachedImage)}
-                className="px-5 py-3 bg-[var(--color-accent)] text-white rounded-xl text-sm font-medium disabled:opacity-40 hover:bg-[var(--color-accent2)] transition-colors"
-              >
-                {streaming ? '...' : t('chat.send')}
-              </button>
+              {streaming ? (
+                <button
+                  onClick={() => abortRef.current?.abort()}
+                  className="px-5 py-3 bg-[var(--color-red)] text-white rounded-xl text-sm font-medium hover:opacity-90 transition-colors flex items-center gap-1.5"
+                  title="Stop generation (Esc)"
+                >
+                  <span className="w-2.5 h-2.5 bg-white rounded-[2px]" />
+                  Stop
+                </button>
+              ) : (
+                <button
+                  onClick={send}
+                  disabled={!input.trim() && !attachedImage}
+                  className="px-5 py-3 bg-[var(--color-accent)] text-white rounded-xl text-sm font-medium disabled:opacity-40 hover:bg-[var(--color-accent2)] transition-colors"
+                >
+                  {t('chat.send')}
+                </button>
+              )}
             </div>
           </div>
     </div>
