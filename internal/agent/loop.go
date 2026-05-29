@@ -285,6 +285,16 @@ func RunLoop(
 		// Call LLM (with retry)
 		eventCh <- Event{Type: "status", Data: fmt.Sprintf("Thinking... (iteration %d/%d, ~%dk tokens)", i+1, maxIterations, tokenEstimate/1000)}
 
+		// Liveness: heartbeat elapsed-time + output size every second. Started
+		// BEFORE StreamMessage on purpose — for a slow/cold local model the
+		// longest dead air is inside StreamMessage itself (Ollama blocks the
+		// HTTP response until a 23GB model finishes loading + prefill), well
+		// before the first delta. outChars stays 0 during load, so the client
+		// shows "Ns · 0 chars" — exactly the proof-of-life we want. Idempotent
+		// stop, called on every exit path before eventCh closes.
+		var outChars int64
+		stopHeartbeat := startHeartbeat(eventCh, &outChars)
+
 		var ch <-chan types.SSEEvent
 		var err error
 		for retry := 0; retry < 3; retry++ {
@@ -296,12 +306,14 @@ func RunLoop(
 				eventCh <- Event{Type: "status", Data: fmt.Sprintf("Retrying... (%d/3): %s", retry+1, err.Error())}
 				select {
 				case <-ctx.Done():
+					stopHeartbeat()
 					return
 				case <-time.After(2 * time.Second):
 				}
 			}
 		}
 		if err != nil {
+			stopHeartbeat()
 			eventCh <- Event{Type: "error", Data: fmt.Sprintf("Failed after 3 retries: %s", err.Error())}
 			return
 		}
@@ -311,11 +323,6 @@ func RunLoop(
 		var toolUses []toolUseBlock
 		currentText := ""
 		var currentTool *toolUseBlock
-
-		// Liveness: heartbeat elapsed-time + output size every second so a slow
-		// model visibly stays alive while we wait on / consume its stream.
-		var outChars int64
-		stopHeartbeat := startHeartbeat(eventCh, &outChars)
 
 		for event := range ch {
 			switch event.Type {
