@@ -80,6 +80,24 @@ type chatClient struct {
 	showStatus   bool
 	http         *http.Client
 	messages     []chatMsg
+
+	// transient one-line status (spinner + elapsed + size) shown via \r while
+	// the model is still working; cleared before any real output is printed.
+	statusLine string
+	spinIdx    int
+}
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// clearStatus erases the transient \r status line if one is showing, so the
+// next real output (text/thinking/tool) starts on a clean line. statusLine
+// holds the VISIBLE text only (no ANSI), so rune count ≈ display width.
+func (c *chatClient) clearStatus() {
+	if c.statusLine == "" {
+		return
+	}
+	fmt.Printf("\r%s\r", strings.Repeat(" ", len([]rune(c.statusLine))+2))
+	c.statusLine = ""
 }
 
 type chatMsg struct {
@@ -214,9 +232,11 @@ func (c *chatClient) streamTurn() (string, error) {
 			if err == io.EOF {
 				break
 			}
+			c.clearStatus()
 			return answer.String(), err
 		}
 	}
+	c.clearStatus() // erase any lingering spinner line before returning
 	return answer.String(), nil
 }
 
@@ -234,7 +254,31 @@ func (c *chatClient) renderLine(line string, answer *strings.Builder) {
 	}
 
 	switch ev.Type {
+	case "heartbeat":
+		// Transient proof-of-life: spinner + elapsed + output size, redrawn in
+		// place via \r. The single signal that distinguishes a slow-but-working
+		// local model from a hung connection (http client timeout is 0).
+		var m struct {
+			ElapsedMs int64 `json:"elapsedMs"`
+			Chars     int64 `json:"chars"`
+		}
+		json.Unmarshal(ev.Data, &m)
+		secs := m.ElapsedMs / 1000
+		elapsed := fmt.Sprintf("%ds", secs)
+		if secs >= 60 {
+			elapsed = fmt.Sprintf("%dm%02ds", secs/60, secs%60)
+		}
+		frame := spinnerFrames[c.spinIdx%len(spinnerFrames)]
+		c.spinIdx++
+		visible := fmt.Sprintf("%s thinking… %s", frame, elapsed)
+		if m.Chars > 0 {
+			visible += fmt.Sprintf(" · %d chars", m.Chars)
+		}
+		c.statusLine = visible
+		fmt.Printf("\r%s%s%s", c.dim(), visible, c.rst())
+
 	case "text":
+		c.clearStatus()
 		var s string
 		json.Unmarshal(ev.Data, &s)
 		fmt.Print(s)
@@ -242,6 +286,7 @@ func (c *chatClient) renderLine(line string, answer *strings.Builder) {
 
 	case "thinking":
 		if c.showThinking {
+			c.clearStatus()
 			var s string
 			json.Unmarshal(ev.Data, &s)
 			fmt.Printf("%s%s%s", c.dim(), s, c.rst())
@@ -249,17 +294,20 @@ func (c *chatClient) renderLine(line string, answer *strings.Builder) {
 
 	case "status":
 		if c.showStatus {
+			c.clearStatus()
 			var s string
 			json.Unmarshal(ev.Data, &s)
 			fmt.Printf("%s· %s%s\n", c.dim(), s, c.rst())
 		}
 
 	case "tool_start":
+		c.clearStatus()
 		var m map[string]string
 		json.Unmarshal(ev.Data, &m)
 		fmt.Printf("%s▸ %s%s\n", c.cyan(), m["name"], c.rst())
 
 	case "tool_input":
+		c.clearStatus()
 		var m struct {
 			Name   string `json:"name"`
 			Input  any    `json:"input"`
@@ -271,6 +319,7 @@ func (c *chatClient) renderLine(line string, answer *strings.Builder) {
 		}
 
 	case "tool_result":
+		c.clearStatus()
 		var m struct {
 			Name    string `json:"name"`
 			Result  string `json:"result"`
@@ -284,6 +333,7 @@ func (c *chatClient) renderLine(line string, answer *strings.Builder) {
 		fmt.Printf("%s  %s %s%s\n", col, marker, truncate(oneLine(m.Result), 200), c.rst())
 
 	case "error":
+		c.clearStatus()
 		var s string
 		json.Unmarshal(ev.Data, &s)
 		fmt.Printf("\n%s✗ %s%s\n", c.red(), s, c.rst())

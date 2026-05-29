@@ -27,6 +27,13 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
   const [isListening, setIsListening] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [_sessions, setSessions] = useState<SessionSummary[]>([]);
+  // Liveness indicators for slow local models: elapsed seconds tick client-side
+  // from the moment we send; genChars is the authoritative output size from the
+  // backend heartbeat. Together they prove the model is alive, not hung —
+  // modeled on Claude Code's "Thinking… (Ns · ↑N)" status line.
+  const [elapsed, setElapsed] = useState(0);
+  const [genChars, setGenChars] = useState(0);
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -49,6 +56,9 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, status]);
+
+  // Stop the liveness clock if the component unmounts mid-stream.
+  useEffect(() => () => { if (tickRef.current) clearInterval(tickRef.current); }, []);
 
   // Auto-save session after each message
   const autoSave = useCallback(async (msgs: ChatMessage[], sid: string | null) => {
@@ -105,6 +115,12 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
     setMessages([...newMsgs, { role: 'assistant', content: '', timestamp: new Date() }]);
     setStreaming(true);
     setStatus(t('chat.thinking'));
+    // Start the liveness clock immediately (don't wait for the first backend
+    // heartbeat at t=1s, and cover the connecting phase before any token).
+    setElapsed(0);
+    setGenChars(0);
+    if (tickRef.current) clearInterval(tickRef.current);
+    tickRef.current = setInterval(() => setElapsed((e) => e + 1), 1000);
 
     // Build message content — include image if attached
     let msgContent: string = text || 'Analyze this image.';
@@ -159,6 +175,7 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
     } finally {
       setStreaming(false);
       setStatus('');
+      if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
       inputRef.current?.focus();
       // Auto-save after response complete
       setMessages((prev) => {
@@ -217,6 +234,11 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
         setStatus('');
         setMessages((prev) => [...prev, { role: 'assistant', content: '', timestamp: new Date() }]);
         break;
+      case 'heartbeat':
+        // Authoritative output size + elapsed from the backend liveness ticker.
+        if (typeof event.data?.chars === 'number') setGenChars(event.data.chars);
+        if (typeof event.data?.elapsedMs === 'number') setElapsed(Math.floor(event.data.elapsedMs / 1000));
+        break;
       case 'status':
         setStatus(event.data);
         break;
@@ -236,12 +258,23 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
     }
   }
 
+  // "Thinking… · 12s · 340 chars" — a moving clock + growing output size is the
+  // canonical "it's alive" signal for a slow local model (Claude Code style).
+  const liveLabel = streaming
+    ? `${status || 'Thinking…'} · ${elapsed}s${genChars > 0 ? ` · ${genChars.toLocaleString()} chars` : ''}`
+    : '';
+
   return (
     <div className="flex flex-col flex-1 min-w-0 h-full w-full">
       {/* Header */}
       <div className="px-4 py-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] flex items-center justify-between">
         <div className="flex items-center gap-2">
-          {status ? (
+          {streaming ? (
+            <div className="flex items-center gap-1.5 text-[var(--color-accent)] text-xs">
+              <div className="w-2 h-2 rounded-full bg-[var(--color-accent)] animate-pulse" />
+              {liveLabel}
+            </div>
+          ) : status ? (
             <div className="flex items-center gap-1.5 text-[var(--color-accent)] text-xs">
               <div className="w-2 h-2 rounded-full bg-[var(--color-accent)] animate-pulse" />
               {status}
@@ -333,12 +366,16 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
               if (msg.content === '' && streaming) {
                 return (
                   <div key={i} className="flex justify-start">
-                    <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl rounded-bl-sm px-4 py-3">
+                    <div className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl rounded-bl-sm px-4 py-3 flex items-center gap-2.5">
                       <div className="flex gap-1">
                         <div className="w-2 h-2 bg-[var(--color-text2)] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                         <div className="w-2 h-2 bg-[var(--color-text2)] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
                         <div className="w-2 h-2 bg-[var(--color-text2)] rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                       </div>
+                      {/* Proof-of-life while the model is still on its first token */}
+                      <span className="text-[11px] text-[var(--color-text2)] tabular-nums">
+                        {elapsed}s{genChars > 0 ? ` · ${genChars.toLocaleString()} chars` : ''}
+                      </span>
                     </div>
                   </div>
                 );

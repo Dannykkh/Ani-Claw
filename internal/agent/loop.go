@@ -6,11 +6,53 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aniclew/aniclew/internal/hooks"
 	"github.com/aniclew/aniclew/internal/types"
 )
+
+// heartbeat emits an elapsed-time + output-size signal once per second while
+// the agent waits on (and consumes) the provider stream. A slow local model
+// (qwen3 on a 16GB GPU offloads to CPU; prompt prefill before the first token
+// can be many seconds of pure silence) otherwise looks hung — the agent loop
+// emits nothing of its own between the pre-call status and the provider's first
+// delta. This is the source of truth every client renders, modeled on Claude
+// Code's "Thinking… (Ns · ↑N tokens)" status line.
+//
+// stop() must be called before the eventCh is closed (it joins the goroutine),
+// so callers defer/scope it to a single provider call.
+func startHeartbeat(eventCh chan<- Event, outChars *int64) (stop func()) {
+	start := time.Now()
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(1 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				eventCh <- Event{Type: "heartbeat", Data: map[string]interface{}{
+					"elapsedMs": time.Since(start).Milliseconds(),
+					"chars":     atomic.LoadInt64(outChars),
+				}}
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			wg.Wait()
+		})
+	}
+}
 
 const baseSystemPrompt = `You are AniClew, an expert coding agent. You act by CALLING TOOLS, not by describing actions.
 
@@ -32,10 +74,10 @@ The ONLY way to change the filesystem, run code, or inspect the project is to em
 - Be concise`
 
 var langInstructions = map[string]string{
-	"ko": "\n\nIMPORTANT: Always respond in Korean (한국어). Code and file paths stay in English, but all explanations, comments to the user, and descriptions must be in Korean.",
-	"en": "\n\nIMPORTANT: Always respond in English.",
-	"ja": "\n\nIMPORTANT: Always respond in Japanese (日本語). Code and file paths stay in English, but all explanations must be in Japanese.",
-	"zh": "\n\nIMPORTANT: Always respond in Chinese (中文). Code and file paths stay in English, but all explanations must be in Chinese.",
+	"ko":   "\n\nIMPORTANT: Always respond in Korean (한국어). Code and file paths stay in English, but all explanations, comments to the user, and descriptions must be in Korean.",
+	"en":   "\n\nIMPORTANT: Always respond in English.",
+	"ja":   "\n\nIMPORTANT: Always respond in Japanese (日本語). Code and file paths stay in English, but all explanations must be in Japanese.",
+	"zh":   "\n\nIMPORTANT: Always respond in Chinese (中文). Code and file paths stay in English, but all explanations must be in Chinese.",
 	"auto": "", // no language instruction — let the model follow the user's language
 }
 
@@ -233,10 +275,10 @@ func RunLoop(
 		// Build request with full context
 		sysPrompt := buildSystemPrompt(responseLang) + projectPrompt + projectCtx + skillText + ragContext + memoryContext
 		req := &types.MessagesRequest{
-			Model:    model,
-			System:   mustJSON([]map[string]string{{"type": "text", "text": sysPrompt}}),
-			Messages: messages,
-			Tools:    tools,
+			Model:     model,
+			System:    mustJSON([]map[string]string{{"type": "text", "text": sysPrompt}}),
+			Messages:  messages,
+			Tools:     tools,
 			MaxTokens: 8192,
 		}
 
@@ -270,6 +312,11 @@ func RunLoop(
 		currentText := ""
 		var currentTool *toolUseBlock
 
+		// Liveness: heartbeat elapsed-time + output size every second so a slow
+		// model visibly stays alive while we wait on / consume its stream.
+		var outChars int64
+		stopHeartbeat := startHeartbeat(eventCh, &outChars)
+
 		for event := range ch {
 			switch event.Type {
 			case "content_block_start":
@@ -302,13 +349,17 @@ func RunLoop(
 
 				if delta.Type == "thinking_delta" {
 					// Stream thinking to UI as dimmed text
-					var thinkDelta struct{ Thinking string `json:"thinking"` }
+					var thinkDelta struct {
+						Thinking string `json:"thinking"`
+					}
 					json.Unmarshal(event.Delta, &thinkDelta)
 					if thinkDelta.Thinking != "" {
+						atomic.AddInt64(&outChars, int64(len(thinkDelta.Thinking)))
 						eventCh <- Event{Type: "thinking", Data: thinkDelta.Thinking}
 					}
 				} else if delta.Type == "text_delta" {
 					currentText += delta.Text
+					atomic.AddInt64(&outChars, int64(len(delta.Text)))
 					eventCh <- Event{Type: "text", Data: delta.Text}
 				} else if delta.Type == "input_json_delta" && currentTool != nil {
 					currentTool.InputRaw += delta.PartialJSON
@@ -328,6 +379,11 @@ func RunLoop(
 			}
 		}
 
+		// Generation finished for this iteration — stop the liveness ticker
+		// before tool execution (tools emit their own progress) and before any
+		// return path that would close eventCh.
+		stopHeartbeat()
+
 		// ── No tool calls → done ──
 		if len(toolUses) == 0 {
 			// ── Memory hooks: extract durable memories from this
@@ -340,9 +396,9 @@ func RunLoop(
 			MaybeConsolidateAsync(ctx, provider, model, workDir)
 
 			eventCh <- Event{Type: "done", Data: map[string]interface{}{
-				"iterations":     i + 1,
+				"iterations":    i + 1,
 				"tokenEstimate": tokenEstimate,
-				"project":        project.Type,
+				"project":       project.Type,
 			}}
 			return
 		}
@@ -482,7 +538,7 @@ func RunLoop(
 			hookRegistry.Execute(hooks.HookPostToolUse, map[string]string{
 				"TOOL_NAME": tu.Name, "WORK_DIR": workDir,
 				"TOOL_RESULT": truncateStr(result, 500),
-				"TOOL_ERROR": fmt.Sprintf("%v", isError),
+				"TOOL_ERROR":  fmt.Sprintf("%v", isError),
 			})
 
 			// Send result to client
@@ -552,7 +608,9 @@ func allToolsErrored(toolResults []map[string]interface{}) bool {
 }
 
 func truncateStr(s string, max int) string {
-	if len(s) <= max { return s }
+	if len(s) <= max {
+		return s
+	}
 	return s[:max] + "..."
 }
 
