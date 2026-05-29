@@ -163,6 +163,7 @@ func (s *Server) Start() error {
 	mux.Handle("GET /icons.svg", webHandler)
 	mux.HandleFunc("GET /api/providers", s.handleListProviders)
 	mux.HandleFunc("POST /api/providers/register", s.handleRegisterProvider)
+	mux.HandleFunc("GET /api/ollama/models", s.handleOllamaModels)
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
 
 	// Projects

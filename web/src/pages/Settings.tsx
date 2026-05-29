@@ -11,6 +11,9 @@ export function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [responseLang, setResponseLang] = useState('auto');
+  // Models actually installed in the local Ollama (via /api/ollama/models), so
+  // we offer real choices instead of a hardcoded guess that may not be pulled.
+  const [ollamaModels, setOllamaModels] = useState<{ id: string; displayName: string }[]>([]);
 
   useEffect(() => {
     fetchJSON<ProviderInfo[]>('/api/providers').then(setProviders);
@@ -20,10 +23,20 @@ export function SettingsPage() {
       setSelModel(c.model);
       setResponseLang(c.responseLang || 'auto');
     });
+    fetchJSON<{ models: { id: string; displayName: string }[] }>('/api/ollama/models')
+      .then((r) => setOllamaModels(r.models || []))
+      .catch(() => setOllamaModels([]));
   }, []);
 
-  const models = providers.find((p) => p.name === selProvider)?.models || [];
+  // For Ollama, prefer the live installed list; fall back to the static list
+  // only if Ollama is unreachable. Cloud providers keep their curated list.
+  const models = selProvider === 'ollama' && ollamaModels.length > 0
+    ? ollamaModels
+    : (providers.find((p) => p.name === selProvider)?.models || []);
   const isCloud = selProvider && selProvider !== 'ollama';
+  // Smallest installed model is the safest fast default for the Quick Start
+  // "Local (Ollama)" button (backend already sorts smallest-first).
+  const defaultOllamaModel = ollamaModels[0]?.id || 'qwen3:8b';
 
   async function quickStart(provider: string, model: string) {
     await putJSON('/api/config', { provider, model });
@@ -68,13 +81,15 @@ export function SettingsPage() {
         <h2 className="text-lg font-semibold mb-3">Quick Start</h2>
         <div className="grid grid-cols-3 gap-3">
           <button
-            onClick={() => quickStart('ollama', 'qwen3:8b')}
+            onClick={() => { if (ollamaModels.length > 0) quickStart('ollama', defaultOllamaModel); }}
             className={`p-4 rounded-xl border text-left transition-all hover:border-[var(--color-accent)] ${config?.provider === 'ollama' ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10' : 'border-[var(--color-border)] bg-[var(--color-surface)]'}`}
           >
             <div className="text-2xl mb-2">🏠</div>
             <div className="text-sm font-semibold">Local (Ollama)</div>
             <div className="text-[10px] text-[var(--color-text2)] mt-1">Free, private, no API key</div>
-            <div className="text-[9px] text-[var(--color-accent)] mt-2">qwen3:8b (fast)</div>
+            <div className="text-[9px] text-[var(--color-accent)] mt-2">
+              {ollamaModels.length > 0 ? `${defaultOllamaModel} (installed)` : 'no model installed'}
+            </div>
           </button>
 
           <button
