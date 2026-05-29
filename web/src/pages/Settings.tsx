@@ -78,13 +78,13 @@ export function SettingsPage() {
           </button>
 
           <button
-            onClick={() => { setSelProvider('openai'); setSelModel('gpt-5.4-mini'); setShowAdvanced(false); }}
+            onClick={() => { setSelProvider('openai'); setSelModel('gpt-5.5-mini'); setShowAdvanced(false); }}
             className={`p-4 rounded-xl border text-left transition-all hover:border-[var(--color-accent)] ${config?.provider === 'openai' ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/10' : 'border-[var(--color-border)] bg-[var(--color-surface)]'}`}
           >
             <div className="text-2xl mb-2">🟢</div>
             <div className="text-sm font-semibold">OpenAI</div>
             <div className="text-[10px] text-[var(--color-text2)] mt-1">API key needed</div>
-            <div className="text-[9px] text-[var(--color-accent)] mt-2">GPT-5.4 / o4</div>
+            <div className="text-[9px] text-[var(--color-accent)] mt-2">GPT-5.5 / o4</div>
           </button>
 
           <button
@@ -94,7 +94,7 @@ export function SettingsPage() {
             <div className="text-2xl mb-2">🟠</div>
             <div className="text-sm font-semibold">Anthropic</div>
             <div className="text-[10px] text-[var(--color-text2)] mt-1">API key needed</div>
-            <div className="text-[9px] text-[var(--color-accent)] mt-2">Claude Opus 4.7 / Sonnet 4.6</div>
+            <div className="text-[9px] text-[var(--color-accent)] mt-2">Claude Opus 4.8 / Sonnet 4.6</div>
           </button>
         </div>
       </div>
