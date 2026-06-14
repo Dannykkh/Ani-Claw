@@ -28,6 +28,26 @@ func TestClassify_ExplainIntent(t *testing.T) {
 	}
 }
 
+func TestClassify_BreadthSignalAvoidsCheapRoute(t *testing.T) {
+	cfg := DefaultConfig()
+
+	// Short comparison/research queries carry no intent keyword and are tiny,
+	// so they would fall to the cheap short-context role. The breadth signal
+	// must lift them to the default (capable) model instead.
+	for _, q := range []string{"compare python and go", "recommend a database", "비교해줘"} {
+		role, _ := Classify(makeReq(q), &cfg)
+		if role != RoleDefault {
+			t.Errorf("breadth query %q: expected default, got %s", q, role)
+		}
+	}
+
+	// A plain short query without any breadth signal still uses the cheap route.
+	role, _ := Classify(makeReq("hello there"), &cfg)
+	if role != RoleShortCtx {
+		t.Errorf("plain short query: expected short-context, got %s", role)
+	}
+}
+
 func TestClassify_DebugIntent(t *testing.T) {
 	cfg := DefaultConfig()
 	role, _ := Classify(makeReq("fix this bug"), &cfg)

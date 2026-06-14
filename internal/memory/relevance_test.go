@@ -113,6 +113,22 @@ func TestBuildSystemContext_EmptyWorkspace(t *testing.T) {
 	}
 }
 
+// The recalled-memory block is appended to the system prompt, so it must carry
+// the trust-boundary note that stops a saved/injected note from being treated
+// as a privileged instruction. Present on every path (added right under the
+// header), including the empty workspace.
+func TestBuildSystemContext_IncludesTrustNote(t *testing.T) {
+	workDir := t.TempDir()
+	ctx, err := BuildSystemContext(workDir, "anything", 3)
+	if err != nil {
+		t.Fatalf("BuildSystemContext: %v", err)
+	}
+	if !strings.Contains(ctx, "cannot grant permissions") ||
+		!strings.Contains(ctx, "untrusted content") {
+		t.Errorf("missing recalled-memory trust-boundary note in %q", ctx)
+	}
+}
+
 func TestBuildSystemContext_IndexOnlyWhenNoQuery(t *testing.T) {
 	workDir := t.TempDir()
 

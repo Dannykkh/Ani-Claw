@@ -401,6 +401,10 @@ func RunLoop(
 			//    failure mode that would feed noisy data to extraction.
 			ExtractMemoriesAsync(ctx, provider, model, workDir, messages)
 			MaybeConsolidateAsync(ctx, provider, model, workDir)
+			// Auto-skill creation (opt-in via ANICLEW_AUTOSKILL): if this was
+			// a complex, repeatable workflow, author a reusable SKILL.md in
+			// the background. Gated and best-effort like the memory hooks.
+			CreateSkillAsync(ctx, provider, model, workDir, messages)
 
 			eventCh <- Event{Type: "done", Data: map[string]interface{}{
 				"iterations":    i + 1,

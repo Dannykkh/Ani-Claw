@@ -69,10 +69,41 @@ func Classify(req *types.MessagesRequest, cfg *RouterConfig) (RoleID, string) {
 		return RoleLongCtx, "Long context"
 	}
 	if tokens < cfg.ContextThresholds.Short {
+		// A comparison, research, or multi-part query fans out into more
+		// reasoning than its short length implies (Fable 5: scale work to
+		// query complexity). Don't drop it onto the cheap short-context model.
+		if breadthSignal(userText) {
+			return RoleDefault, "Short but breadth signal (comparison/research/multi-part)"
+		}
 		return RoleShortCtx, "Short context"
 	}
 
 	return RoleDefault, "Default"
+}
+
+// breadthSignal reports whether the user text is a comparison, open-ended
+// research, or multi-part request. These need a capable model even when the
+// message is short, so the classifier keeps them off the cheapest route.
+func breadthSignal(userText string) bool {
+	if matchesAny(userText,
+		"compare", "comparison", "versus", " vs ", "vs.", "tradeoff", "trade-off",
+		"pros and cons", "pros & cons", "alternative", "recommend", "research",
+		"comprehensive", "evaluate", "difference between", "best way",
+		"비교", "추천", "장단점", "차이", "어느 게", "어느게", "뭐가 나아", "평가",
+	) {
+		return true
+	}
+	// Multiple questions in one turn — several asks fanned out.
+	if strings.Count(userText, "?") >= 2 || strings.Count(userText, "？") >= 2 {
+		return true
+	}
+	// An enumerated or bulleted list of asks.
+	for _, marker := range []string{"\n1.", "\n1)", "\n- ", "\n* ", "1. ", "2. "} {
+		if strings.Contains(userText, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractLastUserText(req *types.MessagesRequest) string {
