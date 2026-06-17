@@ -551,6 +551,7 @@ func RunLoop(
 		var toolUses []toolUseBlock
 		currentText := ""
 		var currentTool *toolUseBlock
+		stopReason := ""
 
 		for event := range ch {
 			switch event.Type {
@@ -609,6 +610,14 @@ func RunLoop(
 					textContent += currentText
 				}
 
+			case "message_delta":
+				var d struct {
+					StopReason string `json:"stop_reason"`
+				}
+				if json.Unmarshal(event.Delta, &d) == nil && d.StopReason != "" {
+					stopReason = d.StopReason
+				}
+
 			case "message_stop":
 				// done with this LLM call
 			}
@@ -618,6 +627,16 @@ func RunLoop(
 		// before tool execution (tools emit their own progress) and before any
 		// return path that would close eventCh.
 		stopHeartbeat()
+
+		// Context-exhaustion guard: a "max_tokens" stop with almost no output
+		// means the prompt filled the model's context window (Ollama defaults to a
+		// small one — 8K), leaving no room to generate. That is the silent failure
+		// that looks like the model "doing nothing" (it emits ~1 token and stops).
+		// Surface it with the actionable fix instead of leaving the user puzzled.
+		if looksContextExhausted(stopReason, atomic.LoadInt64(&outChars), len(toolUses)) {
+			eventCh <- Event{Type: "status", Data: "[Warning] The model hit its token limit with almost no output — the prompt likely fills the context window. Increase Ollama's Context length (Settings → Context length) or shorten the request."}
+			log.Printf("[Agent] context-exhaustion suspected: stop=max_tokens outChars=%d", atomic.LoadInt64(&outChars))
+		}
 
 		// ── No tool calls → done ──
 		if len(toolUses) == 0 {

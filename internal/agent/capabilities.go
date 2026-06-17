@@ -52,3 +52,14 @@ func hasCapability(caps []string, name string) bool {
 	}
 	return false
 }
+
+// looksContextExhausted reports whether a generation result smells like the
+// prompt filled the model's context window: it stopped at the token limit
+// ("max_tokens", which the translator maps from OpenAI/Ollama "length") yet
+// produced almost nothing and called no tool. This separates the silent
+// context-exhaustion failure — the original 8K-context footgun where the model
+// emits ~1 token and stops — from a legitimate long answer that simply hit the
+// output cap (which has plenty of output chars).
+func looksContextExhausted(stopReason string, outChars int64, toolCount int) bool {
+	return stopReason == "max_tokens" && toolCount == 0 && outChars < 200
+}
