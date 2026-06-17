@@ -242,20 +242,36 @@ func RunLoop(
 	// from config with built-in fallbacks.
 	cfg := config.Load()
 
-	// Local models (Ollama/SGLang) run with small context windows — Ollama
-	// defaults to 8K — and the full ~30-tool list inflates the system prompt past
-	// that window, leaving no room to generate: the model emits ~1 token and
-	// stops with finish_reason "length", which looks like a tool-calling failure
-	// but is really context exhaustion. Cap the toolset for local providers so
-	// the prompt fits with generation headroom. Core file/exec tools are always
-	// kept; peripheral tools (desktop automation, notebooks, web) are dropped by
-	// relevance to the task. Cloud models keep the full set unless overridden.
-	// Precedence: env ANICLEW_MAX_TOOLS > config localToolBudget > default 16.
+	// Resolve agent-loop tuning. Local models (Ollama/SGLang) run with small
+	// context windows and degrade with large tool lists or default sampling, so a
+	// per-model profile supplies sensible defaults (tool budget + temperature)
+	// that explicit config/env still override.
+	//   tool budget : env ANICLEW_MAX_TOOLS > config localToolBudget > profile > 16
+	//                 (the full ~30-tool list overflows a small context; core
+	//                  file/exec tools are always kept, peripherals dropped by
+	//                  relevance)
+	//   temperature : config agentTemperature > profile (0 — pinning it low makes
+	//                 tool calling deterministic; at the provider default local
+	//                 models drift into prose instead of emitting tool_use)
+	// Cloud models keep the full toolset and provider default unless
+	// ANICLEW_MAX_TOOLS is set.
 	toolBudget := translate.ToolBudget()
-	if toolBudget == 0 && isLocalProvider(provider.Name()) {
-		if toolBudget = cfg.LocalToolBudget; toolBudget == 0 {
-			toolBudget = defaultLocalToolBudget
+	var agentTemp *float64
+	if isLocalProvider(provider.Name()) {
+		prof, matched := profileFor(model)
+		if toolBudget == 0 {
+			if toolBudget = cfg.LocalToolBudget; toolBudget == 0 {
+				toolBudget = prof.toolBudget
+			}
 		}
+		if cfg.AgentTemperature != nil {
+			agentTemp = cfg.AgentTemperature
+		} else {
+			t := prof.temperature
+			agentTemp = &t
+		}
+		eventCh <- Event{Type: "status", Data: fmt.Sprintf("Model profile: %s (tools=%d, temp=%.1f)", prof.name, toolBudget, *agentTemp)}
+		log.Printf("[Agent] profile=%q matched=%v budget=%d temp=%.2f model=%s", prof.name, matched, toolBudget, *agentTemp, model)
 	}
 	if toolBudget > 0 {
 		var dropped int
@@ -263,24 +279,6 @@ func RunLoop(
 		if dropped > 0 {
 			log.Printf("[Agent] tool budget %d: kept %d, dropped %d (provider=%s)", toolBudget, len(tools), dropped, provider.Name())
 		}
-	}
-
-	// Local models tool-call unreliably at their default sampling temperature —
-	// they often answer in prose ("먼저 현재 프로젝트를…") instead of emitting a
-	// tool_use, which silently ends the loop with nothing done. Pinning the
-	// temperature low makes tool calling deterministic and reliable (verified:
-	// prose at default temp, consistent tool_use at 0). Cloud models, which are
-	// already reliable, keep their provider default. Override via config
-	// agentTemperature.
-	var agentTemp *float64
-	if isLocalProvider(provider.Name()) {
-		if cfg.AgentTemperature != nil {
-			agentTemp = cfg.AgentTemperature
-		} else {
-			t := defaultLocalTemperature
-			agentTemp = &t
-		}
-		log.Printf("[Agent] local tuning (%s): toolBudget=%d temperature=%.2f", provider.Name(), toolBudget, *agentTemp)
 	}
 
 	// Read-only over-exploration guard: a pure question ("what is this project?")
