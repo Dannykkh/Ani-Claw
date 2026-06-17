@@ -298,6 +298,22 @@ func RunLoop(
 		log.Printf("[Agent] read-only question — exploration capped at %d rounds", readOnlyRounds)
 	}
 
+	// Model capability check (Ollama): the agent loop is built on tool calling, so
+	// warn up front when the selected model can't do it — otherwise an agentic
+	// request silently does nothing (the model just chats). devstral, for example,
+	// advertises no "tools" capability through Ollama's generic API. Best-effort
+	// and non-blocking: unknown capabilities skip the check.
+	if provider.Name() == "ollama" {
+		if caps := detectOllamaCapabilities(model); len(caps) > 0 {
+			eventCh <- Event{Type: "status", Data: "Model capabilities: " + strings.Join(caps, ", ")}
+			if !hasCapability(caps, "tools") {
+				warn := fmt.Sprintf("[Warning] %s does not support tool calling — it can only chat, so file edits and other agent actions will not work. Switch to a tools-capable model (e.g. qwen3-coder).", model)
+				eventCh <- Event{Type: "status", Data: warn}
+				log.Printf("[Agent] WARNING: model %s lacks 'tools' capability (caps=%v)", model, caps)
+			}
+		}
+	}
+
 	maxIterations := 25
 
 	// Reflection guard: stop if the model keeps producing tool calls that all
