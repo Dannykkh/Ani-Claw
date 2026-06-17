@@ -31,6 +31,19 @@ type Config struct {
 	WorkDir         string                      `json:"workDir"`         // default workspace
 	AccessToken     string                      `json:"accessToken"`     // web UI access token (empty = no auth)
 	Providers       map[string]ProviderSettings  `json:"providers"`
+
+	// Agent-loop tuning for local models (Ollama/SGLang). Zero/absent values use
+	// built-in defaults; these only apply to local providers (cloud models keep
+	// their full toolset and provider-default sampling).
+	LocalToolBudget  int      `json:"localToolBudget,omitempty"`  // max tools sent to local models (0 → default 16; env ANICLEW_MAX_TOOLS overrides)
+	AgentTemperature *float64 `json:"agentTemperature,omitempty"` // sampling temperature for the local agent loop (absent → 0 for reliable tool calls)
+
+	// ReadOnlyExploreRounds bounds how many tool-using rounds a pure read-only
+	// question (e.g. "what is this project?") may explore before the loop forces
+	// an answer, so the agent doesn't crawl the whole tree (slow + can hit the
+	// iteration cap with no answer). 0 → built-in default (5). Set very high to
+	// effectively disable the guard. Action tasks (edit/fix/create) are exempt.
+	ReadOnlyExploreRounds int `json:"readOnlyExploreRounds,omitempty"`
 }
 
 func DefaultConfig() Config {

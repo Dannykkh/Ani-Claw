@@ -10,9 +10,136 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/aniclew/aniclew/internal/config"
 	"github.com/aniclew/aniclew/internal/hooks"
+	"github.com/aniclew/aniclew/internal/translate"
 	"github.com/aniclew/aniclew/internal/types"
 )
+
+// defaultLocalToolBudget caps the tool count for local providers (Ollama,
+// SGLang) whose context windows are small. 16 keeps the 8 core file/exec tools
+// plus the 8 most task-relevant extras — enough for real coding work while
+// roughly halving the tool-definition tokens in the system prompt. Overridable
+// via config (localToolBudget) or env (ANICLEW_MAX_TOOLS).
+const defaultLocalToolBudget = 16
+
+// defaultLocalTemperature is the sampling temperature for the local agent loop.
+// 0 makes tool calling deterministic and reliable (local models otherwise drift
+// into prose instead of tool_use). Overridable via config (agentTemperature).
+const defaultLocalTemperature = 0.0
+
+// isLocalProvider reports whether the provider is a locally-hosted model server
+// that benefits from a trimmed tool list (small context window, degrades when
+// handed many tools). Cloud providers keep the full set.
+func isLocalProvider(name string) bool {
+	return name == "ollama" || name == "sglang"
+}
+
+// defaultReadOnlyExploreRounds bounds tool-using rounds for a read-only question
+// before the loop forces an answer. Without this, a model — especially a local
+// one — crawls the whole tree for a simple "what is this project?", which is
+// slow and can exhaust the iteration cap with no answer at all. Overridable via
+// config (readOnlyExploreRounds).
+const defaultReadOnlyExploreRounds = 5
+
+// editIntentWords mark a request that wants the agent to CHANGE something. Their
+// presence disqualifies the read-only guard, so action tasks keep the full loop.
+var editIntentWords = []string{
+	"rename", "add", "remove", "delete", "fix", "edit", "create", "write",
+	"implement", "refactor", "update", "change", "modify", "replace", "install",
+	"generate", "migrate", "rewrite", "append", "insert", "convert", "commit",
+	"수정", "고쳐", "고치", "만들", "추가", "삭제", "제거", "구현", "변경",
+	"바꿔", "바꾸", "작성", "생성", "리팩", "교체", "설치",
+}
+
+// readIntentWords mark a question / explanation request (no modification).
+var readIntentWords = []string{
+	"what", "why", "how", "explain", "describe", "summar", "list", "show",
+	"where", "which", "who", "understand", "overview", "tell me", "analyze",
+	"뭐", "뭔", "무엇", "무슨", "정체", "설명", "요약", "알려", "어떻게",
+	"동작", "분석", "보여", "개요", "이해", "어떤", "왜", "나열", "목록",
+	"리스트", "어디", "확인해", "찾아",
+}
+
+// isReadOnlyQuestion reports whether the request is a pure question/explanation
+// with no intent to modify the codebase. Conservative by design: ANY edit-intent
+// word disqualifies it, so action tasks never get the exploration cap (a false
+// "read-only" on an edit task would block the edit; a missed read-only just
+// stays slow). A question mark or a read-intent word qualifies it.
+func isReadOnlyQuestion(text string) bool {
+	t := strings.ToLower(text)
+	for _, w := range editIntentWords {
+		if strings.Contains(t, w) {
+			return false
+		}
+	}
+	if strings.Contains(t, "?") || strings.Contains(t, "？") {
+		return true
+	}
+	for _, w := range readIntentWords {
+		if strings.Contains(t, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// flattenToolResults collapses the tool_use/tool_result exchanges in a message
+// history into a plain-text digest ("### Read {\"file_path\":…}\n<output>"). The
+// read-only guard uses it to answer from gathered context without replaying the
+// tool-call pattern (which makes local models keep calling tools). tool_use
+// blocks (assistant) supply labels; tool_result blocks (user) supply outputs.
+func flattenToolResults(messages []types.Message) string {
+	labels := map[string]string{}
+	for _, m := range messages {
+		if m.Role != "assistant" {
+			continue
+		}
+		var blocks []struct {
+			Type  string          `json:"type"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		}
+		if json.Unmarshal(m.Content, &blocks) != nil {
+			continue
+		}
+		for _, b := range blocks {
+			if b.Type == "tool_use" {
+				labels[b.ID] = strings.TrimSpace(b.Name + " " + string(b.Input))
+			}
+		}
+	}
+	var sb strings.Builder
+	for _, m := range messages {
+		if m.Role != "user" {
+			continue
+		}
+		var blocks []struct {
+			Type      string          `json:"type"`
+			ToolUseID string          `json:"tool_use_id"`
+			Content   json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(m.Content, &blocks) != nil {
+			continue // not a tool_result array (e.g. the plain-text question)
+		}
+		for _, b := range blocks {
+			if b.Type != "tool_result" {
+				continue
+			}
+			var s string
+			if json.Unmarshal(b.Content, &s) != nil {
+				s = string(b.Content)
+			}
+			label := labels[b.ToolUseID]
+			if label == "" {
+				label = "result"
+			}
+			sb.WriteString("### " + label + "\n" + s + "\n\n")
+		}
+	}
+	return sb.String()
+}
 
 // heartbeat emits an elapsed-time + output-size signal once per second while
 // the agent waits on (and consumes) the provider stream. A slow local model
@@ -110,6 +237,66 @@ func RunLoop(
 	messages := make([]types.Message, len(userMessages))
 	copy(messages, userMessages)
 	tools := AllToolDefs(workDir)
+
+	// Agent-loop tuning (tool budget + temperature) for local models, resolved
+	// from config with built-in fallbacks.
+	cfg := config.Load()
+
+	// Local models (Ollama/SGLang) run with small context windows — Ollama
+	// defaults to 8K — and the full ~30-tool list inflates the system prompt past
+	// that window, leaving no room to generate: the model emits ~1 token and
+	// stops with finish_reason "length", which looks like a tool-calling failure
+	// but is really context exhaustion. Cap the toolset for local providers so
+	// the prompt fits with generation headroom. Core file/exec tools are always
+	// kept; peripheral tools (desktop automation, notebooks, web) are dropped by
+	// relevance to the task. Cloud models keep the full set unless overridden.
+	// Precedence: env ANICLEW_MAX_TOOLS > config localToolBudget > default 16.
+	toolBudget := translate.ToolBudget()
+	if toolBudget == 0 && isLocalProvider(provider.Name()) {
+		if toolBudget = cfg.LocalToolBudget; toolBudget == 0 {
+			toolBudget = defaultLocalToolBudget
+		}
+	}
+	if toolBudget > 0 {
+		var dropped int
+		tools, dropped = translate.PruneTools(tools, lastUserText(messages), toolBudget)
+		if dropped > 0 {
+			log.Printf("[Agent] tool budget %d: kept %d, dropped %d (provider=%s)", toolBudget, len(tools), dropped, provider.Name())
+		}
+	}
+
+	// Local models tool-call unreliably at their default sampling temperature —
+	// they often answer in prose ("먼저 현재 프로젝트를…") instead of emitting a
+	// tool_use, which silently ends the loop with nothing done. Pinning the
+	// temperature low makes tool calling deterministic and reliable (verified:
+	// prose at default temp, consistent tool_use at 0). Cloud models, which are
+	// already reliable, keep their provider default. Override via config
+	// agentTemperature.
+	var agentTemp *float64
+	if isLocalProvider(provider.Name()) {
+		if cfg.AgentTemperature != nil {
+			agentTemp = cfg.AgentTemperature
+		} else {
+			t := defaultLocalTemperature
+			agentTemp = &t
+		}
+		log.Printf("[Agent] local tuning (%s): toolBudget=%d temperature=%.2f", provider.Name(), toolBudget, *agentTemp)
+	}
+
+	// Read-only over-exploration guard: a pure question ("what is this project?")
+	// doesn't need the whole tree read. After a few exploration rounds the loop
+	// drops the tools so the model must answer from what it has already read,
+	// instead of crawling every file until it exhausts the iteration cap and
+	// ends with "Max iterations reached" and no answer. Edit/action tasks are
+	// exempt (isReadOnlyQuestion returns false for them).
+	readOnly := isReadOnlyQuestion(lastUserText(messages))
+	readOnlyRounds := defaultReadOnlyExploreRounds
+	if cfg.ReadOnlyExploreRounds > 0 {
+		readOnlyRounds = cfg.ReadOnlyExploreRounds
+	}
+	if readOnly {
+		log.Printf("[Agent] read-only question — exploration capped at %d rounds", readOnlyRounds)
+	}
 
 	maxIterations := 25
 
@@ -216,6 +403,30 @@ func RunLoop(
 	}
 
 	for i := 0; i < maxIterations; i++ {
+		// ── Read-only over-exploration guard ──
+		// Once a pure question has explored enough rounds, collapse the
+		// tool_use/tool_result history into a single "here is what I read"
+		// message and drop tools. Removing the tool-call pattern is essential:
+		// local models (qwen3-coder via Ollama) keep emitting tool calls that the
+		// backend parses even when the tools field is empty, as long as the
+		// conversation still shows the pattern. With a clean digest + no tools the
+		// model answers in text and the loop ends — instead of crawling the whole
+		// tree to the iteration cap and returning "Max iterations reached" with no
+		// answer. Edit/action tasks are exempt (readOnly is false for them).
+		if readOnly && i >= readOnlyRounds {
+			digest := flattenToolResults(messages)
+			if len(digest) > 12000 {
+				digest = digest[:12000] + "\n…(truncated)"
+			}
+			collapsed := lastUserText(userMessages) +
+				"\n\n## Context I gathered from the codebase\n" + digest +
+				"\n\nAnswer the question above directly and concisely from this context. Do not request any more files."
+			messages = []types.Message{{Role: "user", Content: mustJSON(collapsed)}}
+			tools = nil
+			readOnly = false // collapse once; the next pass produces the answer
+			eventCh <- Event{Type: "status", Data: fmt.Sprintf("Read-only question — explored %d rounds, answering now", i)}
+		}
+
 		// ── Context compression ──
 		tokenEstimate := EstimateMessageTokens(messages)
 		if ShouldCompact(compactCfg, tokenEstimate) && len(messages) >= minMessagesForCompact {
@@ -275,11 +486,12 @@ func RunLoop(
 		// Build request with full context
 		sysPrompt := buildSystemPrompt(responseLang) + projectPrompt + projectCtx + skillText + ragContext + memoryContext
 		req := &types.MessagesRequest{
-			Model:     model,
-			System:    mustJSON([]map[string]string{{"type": "text", "text": sysPrompt}}),
-			Messages:  messages,
-			Tools:     tools,
-			MaxTokens: 8192,
+			Model:       model,
+			System:      mustJSON([]map[string]string{{"type": "text", "text": sysPrompt}}),
+			Messages:    messages,
+			Tools:       tools,
+			MaxTokens:   8192,
+			Temperature: agentTemp,
 		}
 
 		// Call LLM (with retry)
