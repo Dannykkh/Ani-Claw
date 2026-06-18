@@ -314,6 +314,19 @@ func RunLoop(
 		tools = filterReadOnlyTools(tools)
 	}
 
+	// @file mentions: "@path" in the message pulls that file's content into
+	// context up front, so the model doesn't have to crawl to find it — a focused
+	// alternative to exploration, especially helpful for local models.
+	if len(messages) > 0 {
+		var last string
+		if json.Unmarshal(messages[len(messages)-1].Content, &last) == nil && strings.Contains(last, "@") {
+			if block, files := expandFileMentions(last, workDir); len(files) > 0 {
+				messages[len(messages)-1] = types.Message{Role: "user", Content: mustJSON(block + "\n---\n" + last)}
+				eventCh <- Event{Type: "status", Data: fmt.Sprintf("Loaded %d referenced file(s): %s", len(files), strings.Join(files, ", "))}
+			}
+		}
+	}
+
 	// Agent-loop tuning (tool budget + temperature) for local models, resolved
 	// from config with built-in fallbacks.
 	cfg := config.Load()
