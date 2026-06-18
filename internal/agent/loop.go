@@ -543,6 +543,8 @@ func RunLoop(
 	didEdit := false
 	verifyAttempts := 0
 	checkpointStarted := false // clear the undo buffer on this turn's first edit
+	var editedFiles []string   // files changed this session, for the completion summary
+	testResult := ""           // auto-verify outcome for the summary ("통과"/"실패"/"")
 
 	for i := 0; i < maxIterations; i++ {
 		// ── Read-only over-exploration guard ──
@@ -784,6 +786,7 @@ func RunLoop(
 				eventCh <- Event{Type: "status", Data: "Auto-verify: running tests after edits…"}
 				vout, vfailed, vran := runAutoVerify(workDir)
 				if vran && vfailed {
+					testResult = "실패"
 					verifyAttempts++
 					eventCh <- Event{Type: "status", Data: fmt.Sprintf("Auto-verify: tests failed — asking the model to fix (attempt %d/%d)", verifyAttempts, maxVerifyAttempts)}
 					if textContent != "" {
@@ -795,8 +798,24 @@ func RunLoop(
 					continue
 				}
 				if vran {
+					testResult = "통과"
 					eventCh <- Event{Type: "status", Data: "Auto-verify: tests passed"}
 				}
+			}
+
+			// Completion summary: a one-line recap of what changed this session,
+			// appended after the model's final answer (persists in both clients).
+			if didEdit {
+				files := uniqueStrings(editedFiles)
+				summary := fmt.Sprintf("바꾼 파일 %d개", len(files))
+				if len(files) > 0 {
+					summary += ": " + strings.Join(files, ", ")
+				}
+				if testResult != "" {
+					summary += " · 테스트 " + testResult
+				}
+				summary += fmt.Sprintf(" · %d회 반복", i+1)
+				eventCh <- Event{Type: "text", Data: "\n\n---\n[요약] " + summary}
 			}
 
 			// ── Memory hooks: extract durable memories from this
@@ -1006,6 +1025,7 @@ func RunLoop(
 				if d := unifiedLineDiff(diffBefore, editFileAfter(tu.Name, tu.Input)); d != "" {
 					eventCh <- Event{Type: "diff", Data: map[string]string{"file": diffFile, "diff": d}}
 				}
+				editedFiles = append(editedFiles, diffFile) // deduped in the summary
 			}
 
 			toolResults = append(toolResults, map[string]interface{}{
