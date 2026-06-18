@@ -470,6 +470,11 @@ func RunLoop(
 	// before being forced to answer.
 	var exploreScore float64
 
+	// Auto-verify state: whether the model edited any file this session, and how
+	// many times we've already asked it to fix failing tests.
+	didEdit := false
+	verifyAttempts := 0
+
 	for i := 0; i < maxIterations; i++ {
 		// ── Read-only over-exploration guard ──
 		// Once a pure question has explored enough rounds, collapse the
@@ -693,6 +698,30 @@ func RunLoop(
 
 		// ── No tool calls → done ──
 		if len(toolUses) == 0 {
+			// ── Auto-verify: before declaring done, run the project's tests if
+			//    the model edited files (the Claude-Code "edit → test → fix"
+			//    loop). On failure, feed the output back so the model fixes it —
+			//    bounded by maxVerifyAttempts so an unrelated/pre-existing failure
+			//    cannot loop forever. Skips silently when there is no test runner.
+			if didEdit && autoVerifyEnabled() && verifyAttempts < maxVerifyAttempts {
+				eventCh <- Event{Type: "status", Data: "Auto-verify: running tests after edits…"}
+				vout, vfailed, vran := runAutoVerify(workDir)
+				if vran && vfailed {
+					verifyAttempts++
+					eventCh <- Event{Type: "status", Data: fmt.Sprintf("Auto-verify: tests failed — asking the model to fix (attempt %d/%d)", verifyAttempts, maxVerifyAttempts)}
+					if textContent != "" {
+						messages = append(messages, types.Message{Role: "assistant", Content: mustJSON([]map[string]interface{}{{"type": "text", "text": textContent}})})
+					}
+					messages = append(messages, types.Message{Role: "user", Content: mustJSON(
+						"Automated verification ran the tests after your changes and they FAILED:\n\n" + vout +
+							"\n\nIf these failures are caused by your edits, fix them and we'll re-verify. If they are pre-existing and unrelated to your change, briefly say so and stop.")})
+					continue
+				}
+				if vran {
+					eventCh <- Event{Type: "status", Data: "Auto-verify: tests passed"}
+				}
+			}
+
 			// ── Memory hooks: extract durable memories from this
 			//    conversation and (maybe) consolidate. Both run in
 			//    background goroutines and their failures are logged,
@@ -717,6 +746,13 @@ func RunLoop(
 		// Advance the read-only exploration budget, weighting content reads above
 		// navigation (see exploreScore / iterationWeight).
 		exploreScore += iterationWeight(toolUses)
+
+		// Note file edits so auto-verify knows to run tests at completion.
+		for _, tu := range toolUses {
+			if tu.Name == "Write" || tu.Name == "Edit" {
+				didEdit = true
+			}
+		}
 
 		// ── Build assistant message with tool_use blocks ──
 		var assistantContent []map[string]interface{}
