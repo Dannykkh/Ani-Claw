@@ -24,6 +24,7 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState('');
+  const [planReady, setPlanReady] = useState(false); // a /plan run finished; offer Approve & Run
   const [attachedImage, setAttachedImage] = useState<string | null>(null); // base64
   const [isListening, setIsListening] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -105,12 +106,13 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
     }
   };
 
-  async function send() {
-    const text = input.trim();
+  async function send(overrideText?: string) {
+    const text = (overrideText ?? input).trim();
     if (!text && !attachedImage) return;
     if (streaming) return;
 
-    setInput('');
+    setPlanReady(false); // any new turn clears the plan-approval prompt
+    if (overrideText === undefined) setInput('');
     const displayText = attachedImage ? `${text} [📎 image attached]` : text;
     const userMsg: ChatMessage = { role: 'user', content: displayText || '[image]', timestamp: new Date() };
     const newMsgs = [...messages, userMsg];
@@ -270,6 +272,7 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
         break;
       case 'done':
       case 'stream_end':
+        if (event.type === 'done' && event.data?.planMode) setPlanReady(true);
         setStatus('');
         setMessages((prev) => {
           if (prev[prev.length - 1]?.role === 'assistant' && prev[prev.length - 1]?.content === '') {
@@ -457,6 +460,17 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
                 <span className="text-xs text-[var(--color-text2)]">Image attached</span>
               </div>
             )}
+            {planReady && !streaming && (
+              <div className="w-full mb-2 flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-[var(--color-surface2)] border border-[var(--color-accent)]">
+                <span className="text-xs text-[var(--color-text)]">계획이 준비됐어요. 검토 후 진행하세요.</span>
+                <button
+                  onClick={() => send('위 계획대로 구현을 진행해줘.')}
+                  className="text-xs font-semibold px-3 py-1.5 rounded-md bg-[var(--color-accent)] text-white hover:opacity-90 whitespace-nowrap"
+                >
+                  승인 &amp; 실행
+                </button>
+              </div>
+            )}
             <div className="flex gap-2 items-end w-full">
               {/* Image upload */}
               <label className="px-3 py-3 rounded-xl cursor-pointer text-[var(--color-text2)] hover:bg-[var(--color-surface2)] transition-colors" title="Attach image">
@@ -576,7 +590,7 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
                 </button>
               ) : (
                 <button
-                  onClick={send}
+                  onClick={() => send()}
                   disabled={!input.trim() && !attachedImage}
                   className="px-5 py-3 bg-[var(--color-accent)] text-white rounded-xl text-sm font-medium disabled:opacity-40 hover:bg-[var(--color-accent2)] transition-colors"
                 >
