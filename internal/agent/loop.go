@@ -66,6 +66,21 @@ func iterationWeight(toolUses []toolUseBlock) float64 {
 	return navRoundWeight
 }
 
+// planModeTools is the read-only tool surface allowed in plan mode: the agent
+// explores but cannot change anything, so it produces a plan instead of acting.
+var planModeTools = map[string]bool{"Read": true, "Glob": true, "Grep": true, "LS": true}
+
+// filterReadOnlyTools keeps only the read-only tools used by plan mode.
+func filterReadOnlyTools(tools []types.ToolDef) []types.ToolDef {
+	out := make([]types.ToolDef, 0, len(tools))
+	for _, t := range tools {
+		if planModeTools[t.Name] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // editIntentWords mark a request that wants the agent to CHANGE something. Their
 // presence disqualifies the read-only guard, so action tasks keep the full loop.
 var editIntentWords = []string{
@@ -275,6 +290,30 @@ func RunLoop(
 	copy(messages, userMessages)
 	tools := AllToolDefs(workDir)
 
+	// Plan mode: "/plan <task>" makes the agent explore read-only and produce a
+	// step-by-step plan WITHOUT editing — the Claude-Code plan-then-execute flow.
+	// We strip the "/plan" prefix, restrict tools to read-only, and route output
+	// through the exploration guard so a plan is always produced. The user reviews
+	// it and asks to proceed in a follow-up (normal) turn.
+	planMode := false
+	planTask := ""
+	if len(messages) > 0 {
+		var last string
+		if json.Unmarshal(messages[len(messages)-1].Content, &last) == nil {
+			if trimmed := strings.TrimSpace(last); strings.HasPrefix(strings.ToLower(trimmed), "/plan") {
+				planMode = true
+				planTask = strings.TrimSpace(trimmed[len("/plan"):])
+				if planTask == "" {
+					planTask = "Plan the requested work."
+				}
+				messages[len(messages)-1] = types.Message{Role: "user", Content: mustJSON(planTask)}
+			}
+		}
+	}
+	if planMode {
+		tools = filterReadOnlyTools(tools)
+	}
+
 	// Agent-loop tuning (tool budget + temperature) for local models, resolved
 	// from config with built-in fallbacks.
 	cfg := config.Load()
@@ -324,7 +363,7 @@ func RunLoop(
 	// instead of crawling every file until it exhausts the iteration cap and
 	// ends with "Max iterations reached" and no answer. Edit/action tasks are
 	// exempt (isReadOnlyQuestion returns false for them).
-	readOnly := isReadOnlyQuestion(lastUserText(messages))
+	readOnly := planMode || isReadOnlyQuestion(lastUserText(messages))
 	readOnlyRounds := defaultReadOnlyExploreRounds
 	if cfg.ReadOnlyExploreRounds > 0 {
 		readOnlyRounds = cfg.ReadOnlyExploreRounds
@@ -491,10 +530,15 @@ func RunLoop(
 			if len(digest) > 12000 {
 				digest = digest[:12000] + "\n…(truncated)"
 			}
-			collapsed := lastUserText(userMessages) +
+			collapseQuestion := lastUserText(userMessages)
+			collapseClosing := "\n\nAnswer the question above directly and concisely from this context. Do not request any more files."
+			if planMode {
+				collapseQuestion = planTask
+				collapseClosing = "\n\nNow produce the step-by-step implementation plan from this context (which files to change and what to do in each). Do NOT make changes; do not request more files."
+			}
+			collapsed := collapseQuestion +
 				"\n\n## Context I gathered from the codebase\n" + digest +
-				"\n\nAnswer the question above directly and concisely from this context. Do not request any more files." +
-				langReminder(responseLang)
+				collapseClosing + langReminder(responseLang)
 			messages = []types.Message{{Role: "user", Content: mustJSON(collapsed)}}
 			tools = nil
 			readOnly = false // collapse once; the next pass produces the answer
@@ -559,6 +603,9 @@ func RunLoop(
 
 		// Build request with full context
 		sysPrompt := buildSystemPrompt(responseLang) + projectPrompt + projectCtx + skillText + ragContext + memoryContext
+		if planMode {
+			sysPrompt += "\n\n## PLAN MODE\nYou are in plan mode. Explore the codebase with the read-only tools and produce a concrete, step-by-step implementation plan (which files to change and what to do in each). You have NO edit tools — do not attempt to make changes. End with the plan; the user will review it and ask you to proceed."
+		}
 		req := &types.MessagesRequest{
 			Model:       model,
 			System:      mustJSON([]map[string]string{{"type": "text", "text": sysPrompt}}),
@@ -735,10 +782,15 @@ func RunLoop(
 			// the background. Gated and best-effort like the memory hooks.
 			CreateSkillAsync(ctx, provider, model, workDir, messages)
 
+			if planMode {
+				eventCh <- Event{Type: "status", Data: "Plan ready — review it above, then reply to proceed with implementation."}
+			}
+
 			eventCh <- Event{Type: "done", Data: map[string]interface{}{
 				"iterations":    i + 1,
 				"tokenEstimate": tokenEstimate,
 				"project":       project.Type,
+				"planMode":      planMode,
 			}}
 			return
 		}
