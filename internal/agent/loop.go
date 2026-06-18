@@ -288,6 +288,22 @@ func RunLoop(
 
 	messages := make([]types.Message, len(userMessages))
 	copy(messages, userMessages)
+
+	// /undo: revert the agent's most recent edits, then stop (no LLM call).
+	if len(messages) > 0 {
+		var last string
+		if json.Unmarshal(messages[len(messages)-1].Content, &last) == nil &&
+			strings.EqualFold(strings.TrimSpace(last), "/undo") {
+			if reverted, ok := undoCheckpoint(workDir); ok {
+				eventCh <- Event{Type: "text", Data: "되돌렸습니다:\n- " + strings.Join(reverted, "\n- ")}
+			} else {
+				eventCh <- Event{Type: "text", Data: "되돌릴 변경이 없습니다."}
+			}
+			eventCh <- Event{Type: "done", Data: nil}
+			return
+		}
+	}
+
 	tools := AllToolDefs(workDir)
 
 	// Plan mode: "/plan <task>" makes the agent explore read-only and produce a
@@ -526,6 +542,7 @@ func RunLoop(
 	// many times we've already asked it to fix failing tests.
 	didEdit := false
 	verifyAttempts := 0
+	checkpointStarted := false // clear the undo buffer on this turn's first edit
 
 	for i := 0; i < maxIterations; i++ {
 		// ── Read-only over-exploration guard ──
@@ -960,6 +977,13 @@ func RunLoop(
 			if tu.Name == "Edit" || tu.Name == "Write" {
 				diffFile = editFilePath(tu.Input)
 				diffBefore = editFileBefore(tu.Name, tu.Input, workDir)
+				// Snapshot the file's prior state for /undo (new generation on the
+				// turn's first edit).
+				if !checkpointStarted {
+					startCheckpoint(workDir)
+					checkpointStarted = true
+				}
+				checkpointFile(workDir, diffFile, resolvePath(diffFile, workDir))
 			}
 
 			result, isError := ExecuteTool(tu.Name, tu.Input, workDir)
