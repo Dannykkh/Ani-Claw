@@ -332,6 +332,24 @@ func (c *chatClient) renderLine(line string, answer *strings.Builder) {
 		}
 		fmt.Printf("%s  %s %s%s\n", col, marker, truncate(oneLine(m.Result), 200), c.rst())
 
+	case "diff":
+		c.clearStatus()
+		var m struct {
+			File string `json:"file"`
+			Diff string `json:"diff"`
+		}
+		json.Unmarshal(ev.Data, &m)
+		fmt.Printf("%s  ± %s%s\n", c.cyan(), m.File, c.rst())
+		for _, ln := range strings.Split(strings.TrimRight(m.Diff, "\n"), "\n") {
+			col := c.dim()
+			if strings.HasPrefix(ln, "+ ") {
+				col = c.cyan()
+			} else if strings.HasPrefix(ln, "- ") {
+				col = c.red()
+			}
+			fmt.Printf("%s  %s%s\n", col, ln, c.rst())
+		}
+
 	case "error":
 		c.clearStatus()
 		var s string

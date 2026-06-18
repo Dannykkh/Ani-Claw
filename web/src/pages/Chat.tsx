@@ -9,6 +9,7 @@ interface ChatMessage {
   toolName?: string;
   toolInput?: Record<string, unknown> | string;
   toolResult?: string;
+  toolDiff?: string;
   isError?: boolean;
   timestamp: Date;
 }
@@ -245,6 +246,20 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
         setStatus('');
         setMessages((prev) => [...prev, { role: 'assistant', content: '', timestamp: new Date() }]);
         break;
+      case 'diff':
+        // Attach the before/after diff to the most recent Edit/Write tool card.
+        setMessages((prev) => {
+          const updated = [...prev];
+          for (let i = updated.length - 1; i >= 0; i--) {
+            if (updated[i].role === 'tool' && !updated[i].toolDiff &&
+                (updated[i].toolName === 'Edit' || updated[i].toolName === 'Write')) {
+              updated[i] = { ...updated[i], toolDiff: event.data.diff };
+              break;
+            }
+          }
+          return updated;
+        });
+        break;
       case 'heartbeat':
         // Authoritative output size + elapsed from the backend liveness ticker.
         if (typeof event.data?.chars === 'number') setGenChars(event.data.chars);
@@ -368,6 +383,21 @@ export function ChatPage({ loadSessionId, onSessionLoaded }: ChatPageProps) {
                         <div className="px-3 py-2 flex items-center gap-2">
                           <div className="w-3 h-3 border-2 border-[var(--color-accent)] border-t-transparent rounded-full animate-spin" />
                           <span className="text-xs text-[var(--color-text2)]">{t('chat.executing')}</span>
+                        </div>
+                      )}
+                      {msg.toolDiff && (
+                        <div className="px-3 py-2 border-t border-[var(--color-border)] max-h-72 overflow-auto">
+                          <div className="text-[10px] text-[var(--color-text2)] uppercase mb-1">Diff</div>
+                          <pre className="text-xs whitespace-pre font-mono leading-snug">
+                            {msg.toolDiff.split('\n').map((ln, k) => {
+                              const cls = ln.startsWith('+ ')
+                                ? 'text-[var(--color-green)] bg-green-500/10'
+                                : ln.startsWith('- ')
+                                  ? 'text-[var(--color-red)] bg-red-500/10'
+                                  : 'text-[var(--color-text2)]';
+                              return <div key={k} className={cls}>{ln || ' '}</div>;
+                            })}
+                          </pre>
                         </div>
                       )}
                     </div>
