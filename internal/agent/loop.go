@@ -239,6 +239,19 @@ func buildSystemPrompt(responseLang string) string {
 	return baseSystemPrompt + instruction
 }
 
+// langReminders is a SHORT, native-language directive to append right at the end
+// of a generation prompt. Recency matters: when the closing instruction is in
+// English, weaker models (observed: gemma4) drift to English even with a Korean
+// directive higher up in the system prompt. Empty for en/auto/unknown.
+var langReminders = map[string]string{
+	"ko": "\n\n한국어로 답하세요.",
+	"ja": "\n\n日本語で答えてください。",
+	"zh": "\n\n请用中文回答。",
+}
+
+// langReminder returns the recency reminder for a response language ("" if none).
+func langReminder(responseLang string) string { return langReminders[responseLang] }
+
 // Event is sent to the client via SSE during the agent loop.
 type Event struct {
 	Type string      `json:"type"`
@@ -463,7 +476,8 @@ func RunLoop(
 			}
 			collapsed := lastUserText(userMessages) +
 				"\n\n## Context I gathered from the codebase\n" + digest +
-				"\n\nAnswer the question above directly and concisely from this context. Do not request any more files."
+				"\n\nAnswer the question above directly and concisely from this context. Do not request any more files." +
+				langReminder(responseLang)
 			messages = []types.Message{{Role: "user", Content: mustJSON(collapsed)}}
 			tools = nil
 			readOnly = false // collapse once; the next pass produces the answer
