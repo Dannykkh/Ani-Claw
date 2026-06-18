@@ -42,6 +42,29 @@ func isLocalProvider(name string) bool {
 // config (readOnlyExploreRounds).
 const defaultReadOnlyExploreRounds = 5
 
+// Read-only exploration is weighted by what the model actually consumed:
+// content reads advance the budget faster than navigation, so listing
+// directories doesn't burn the rounds a model needs to read real content.
+const (
+	contentRoundWeight = 1.0 // a round that read content (Read/Grep/…)
+	navRoundWeight      = 0.5 // a navigation-only round (LS/Glob)
+)
+
+// isNavTool reports whether a tool only navigates (lists/finds) rather than
+// reading file content.
+func isNavTool(name string) bool { return name == "LS" || name == "Glob" }
+
+// iterationWeight scores one tool-using round for the read-only budget: a round
+// that called any content tool counts full; a navigation-only round counts half.
+func iterationWeight(toolUses []toolUseBlock) float64 {
+	for _, tu := range toolUses {
+		if !isNavTool(tu.Name) {
+			return contentRoundWeight
+		}
+	}
+	return navRoundWeight
+}
+
 // editIntentWords mark a request that wants the agent to CHANGE something. Their
 // presence disqualifies the read-only guard, so action tasks keep the full loop.
 var editIntentWords = []string{
@@ -416,6 +439,12 @@ func RunLoop(
 		eventCh <- Event{Type: "status", Data: "MCP config detected"}
 	}
 
+	// exploreScore weights the read-only guard by what the model actually read:
+	// content reads (Read/Grep) count full, navigation (LS/Glob) counts half — so
+	// a model that lists a lot still gets enough rounds to read real content
+	// before being forced to answer.
+	var exploreScore float64
+
 	for i := 0; i < maxIterations; i++ {
 		// ── Read-only over-exploration guard ──
 		// Once a pure question has explored enough rounds, collapse the
@@ -427,7 +456,7 @@ func RunLoop(
 		// model answers in text and the loop ends — instead of crawling the whole
 		// tree to the iteration cap and returning "Max iterations reached" with no
 		// answer. Edit/action tasks are exempt (readOnly is false for them).
-		if readOnly && i >= readOnlyRounds {
+		if readOnly && exploreScore >= float64(readOnlyRounds) {
 			digest := flattenToolResults(messages)
 			if len(digest) > 12000 {
 				digest = digest[:12000] + "\n…(truncated)"
@@ -658,6 +687,10 @@ func RunLoop(
 			}}
 			return
 		}
+
+		// Advance the read-only exploration budget, weighting content reads above
+		// navigation (see exploreScore / iterationWeight).
+		exploreScore += iterationWeight(toolUses)
 
 		// ── Build assistant message with tool_use blocks ──
 		var assistantContent []map[string]interface{}
