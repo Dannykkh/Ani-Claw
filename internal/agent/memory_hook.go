@@ -44,6 +44,21 @@ func memoryEnabled() bool {
 	return v != "off" && v != "0" && v != "false"
 }
 
+// MemoryHeadsUp returns a one-time notice for the user when this workspace has
+// no MEMORY.md yet and memory is enabled — so they learn that long-term memory
+// files (MEMORY.md, memory/) may be written here on session end, instead of the
+// files appearing silently. Returns "" when memory is off or MEMORY.md already
+// exists (i.e. not a first run for this workspace).
+func MemoryHeadsUp(workDir string) string {
+	if !memoryEnabled() {
+		return ""
+	}
+	if _, err := os.Stat(memory.Entrypoint(workDir)); err == nil {
+		return ""
+	}
+	return "[Note] First run here — long-term memory (MEMORY.md, memory/) may be saved to this workspace when the session ends. Disable with ANICLEW_MEMORY=off."
+}
+
 // BuildMemoryContext returns the memory snippet to append to the system
 // prompt for this turn. Uses the most recent user message as the
 // relevance query. Returns "" on any error or when memory is disabled

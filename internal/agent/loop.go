@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -452,6 +453,17 @@ func RunLoop(
 		eventCh <- Event{Type: "status", Data: "MCP config detected"}
 	}
 
+	// First-run heads-up: surface the agent-managed files this workspace will get
+	// (long-term memory + remembered permissions) instead of creating them
+	// silently. The permission file (.claude/settings.json) is only created if a
+	// tool gets auto-allowed, so it is announced at creation time below.
+	if msg := MemoryHeadsUp(workDir); msg != "" {
+		eventCh <- Event{Type: "status", Data: msg}
+	}
+	claudeSettings := filepath.Join(workDir, ".claude", "settings.json")
+	permFileExisted := fileExists(claudeSettings)
+	permFileNotified := false
+
 	// exploreScore weights the read-only guard by what the model actually read:
 	// content reads (Read/Grep) count full, navigation (LS/Glob) counts half — so
 	// a model that lists a lot still gets enough rounds to read real content
@@ -813,6 +825,12 @@ func RunLoop(
 				// Tool was allowed by legacy check but snapshot says "ask"
 				// Persist this as an allow rule for future sessions
 				hooks.PersistAllowRule(workDir, tu.Name, "")
+				// Announce the first time we create .claude/settings.json so the
+				// user knows a permission file was written to their workspace.
+				if !permFileExisted && !permFileNotified && fileExists(claudeSettings) {
+					permFileNotified = true
+					eventCh <- Event{Type: "status", Data: "[Note] Created .claude/settings.json in this workspace to remember allowed tool permissions."}
+				}
 			}
 
 			// Show tool input to client
