@@ -101,11 +101,12 @@ func ProcessSlashCommand(input string, skills []SkillInfo) (string, error) {
 func buildHelpText(skills []SkillInfo) string {
 	var sb strings.Builder
 	sb.WriteString("Available commands:\n\n")
-	sb.WriteString("  /help     — Show this help\n")
-	sb.WriteString("  /clear    — Clear chat\n")
-	sb.WriteString("  /model    — Change model\n")
-	sb.WriteString("  /plan     — Enter plan mode\n")
-	sb.WriteString("  /compact  — Compress conversation context\n")
+	sb.WriteString("  /help       — Show this help\n")
+	sb.WriteString("  /plan <task> — Plan first (read-only), then Approve & Run to execute\n")
+	sb.WriteString("  /undo       — Revert the agent's most recent edits\n")
+	sb.WriteString("  /clear      — Clear chat\n")
+	sb.WriteString("  /model      — Change model\n")
+	sb.WriteString("  /compact    — Compress conversation context\n")
 	sb.WriteString("\nSkill commands:\n")
 
 	commands := ParseSlashCommands(skills)
