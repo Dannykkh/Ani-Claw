@@ -889,6 +889,14 @@ func RunLoop(
 				continue
 			}
 
+			// Capture pre-edit state so the user can be shown a diff of the change
+			// (Write reads the old file now; Edit uses its old_string).
+			var diffFile, diffBefore string
+			if tu.Name == "Edit" || tu.Name == "Write" {
+				diffFile = editFilePath(tu.Input)
+				diffBefore = editFileBefore(tu.Name, tu.Input, workDir)
+			}
+
 			result, isError := ExecuteTool(tu.Name, tu.Input, workDir)
 
 			// ── Post-tool hook ──
@@ -902,6 +910,14 @@ func RunLoop(
 			eventCh <- Event{Type: "tool_result", Data: map[string]interface{}{
 				"id": tu.ID, "name": tu.Name, "result": truncateStr(result, 2000), "isError": isError,
 			}}
+
+			// Show the edit as a before/after diff so the user sees exactly what
+			// changed — the Claude-Code-style edit preview.
+			if diffFile != "" && !isError {
+				if d := unifiedLineDiff(diffBefore, editFileAfter(tu.Name, tu.Input)); d != "" {
+					eventCh <- Event{Type: "diff", Data: map[string]string{"file": diffFile, "diff": d}}
+				}
+			}
 
 			toolResults = append(toolResults, map[string]interface{}{
 				"type":        "tool_result",
