@@ -1004,6 +1004,14 @@ func RunLoop(
 				"danger": string(dangerLevel),
 			}}
 
+			// Plan mode hard-enforces read-only: block any non-read-only tool the
+			// model emitted (the backend can parse a tool call that was withheld
+			// from the tools list), so plan mode never edits or runs commands.
+			if planMode && !planModeTools[tu.Name] {
+				allowed = false
+				permReason = "Plan mode is read-only — describe this change in your plan instead of editing or running commands"
+			}
+
 			if !allowed {
 				eventCh <- Event{Type: "tool_result", Data: map[string]interface{}{
 					"id": tu.ID, "name": tu.Name,
