@@ -765,6 +765,32 @@ func RunLoop(
 		// return path that would close eventCh.
 		stopHeartbeat()
 
+		// Recover tool calls the model leaked as plain text instead of the
+		// parseable format the backend expects (observed with qwen via Ollama) —
+		// so a formatting slip doesn't silently end the turn with nothing done.
+		if len(toolUses) == 0 {
+			if recovered, cleaned := recoverLeakedToolCalls(textContent); len(recovered) > 0 {
+				var valid []toolUseBlock
+				for _, c := range recovered {
+					for _, t := range tools {
+						if t.Name == c.Name {
+							valid = append(valid, c)
+							break
+						}
+					}
+				}
+				if len(valid) > 0 {
+					log.Printf("[Agent] recovered %d leaked tool call(s) from text", len(valid))
+					toolUses = valid
+					textContent = cleaned
+					for _, c := range valid {
+						eventCh <- Event{Type: "status", Data: "Recovered a tool call written as text: " + c.Name}
+						eventCh <- Event{Type: "tool_start", Data: map[string]string{"id": c.ID, "name": c.Name}}
+					}
+				}
+			}
+		}
+
 		// Context-exhaustion guard: a "max_tokens" stop with almost no output
 		// means the prompt filled the model's context window (Ollama defaults to a
 		// small one — 8K), leaving no room to generate. That is the silent failure
