@@ -48,7 +48,7 @@ const defaultReadOnlyExploreRounds = 5
 // directories doesn't burn the rounds a model needs to read real content.
 const (
 	contentRoundWeight = 1.0 // a round that read content (Read/Grep/…)
-	navRoundWeight      = 0.5 // a navigation-only round (LS/Glob)
+	navRoundWeight     = 0.5 // a navigation-only round (LS/Glob)
 )
 
 // isNavTool reports whether a tool only navigates (lists/finds) rather than
@@ -544,7 +544,7 @@ func RunLoop(
 	verifyAttempts := 0
 	checkpointStarted := false // clear the undo buffer on this turn's first edit
 	var editedFiles []string   // files changed this session, for the completion summary
-	testResult := ""           // auto-verify outcome for the summary ("통과"/"실패"/"")
+	testResult := ""           // auto-verify outcome for the summary ("passed"/"failed"/"")
 
 	for i := 0; i < maxIterations; i++ {
 		// ── Read-only over-exploration guard ──
@@ -812,7 +812,7 @@ func RunLoop(
 				eventCh <- Event{Type: "status", Data: "Auto-verify: running tests after edits…"}
 				vout, vfailed, vran := runAutoVerify(workDir)
 				if vran && vfailed {
-					testResult = "실패"
+					testResult = "failed"
 					verifyAttempts++
 					eventCh <- Event{Type: "status", Data: fmt.Sprintf("Auto-verify: tests failed — asking the model to fix (attempt %d/%d)", verifyAttempts, maxVerifyAttempts)}
 					if textContent != "" {
@@ -824,7 +824,7 @@ func RunLoop(
 					continue
 				}
 				if vran {
-					testResult = "통과"
+					testResult = "passed"
 					eventCh <- Event{Type: "status", Data: "Auto-verify: tests passed"}
 				}
 			}
@@ -838,10 +838,29 @@ func RunLoop(
 					summary += ": " + strings.Join(files, ", ")
 				}
 				if testResult != "" {
-					summary += " · 테스트 " + testResult
+					summary += " · 테스트 " + testResultLabel(testResult)
 				}
 				summary += fmt.Sprintf(" · %d회 반복", i+1)
 				eventCh <- Event{Type: "text", Data: "\n\n---\n[요약] " + summary}
+			}
+
+			receiptPath := ""
+			if didEdit || planMode {
+				receipt := AgentReceipt{
+					Provider:     provider.Name(),
+					Model:        model,
+					ProjectType:  project.Type,
+					PlanMode:     planMode,
+					Iterations:   i + 1,
+					EditedFiles:  uniqueStrings(editedFiles),
+					Verification: receiptVerification(testResult),
+				}
+				if path, err := writeAgentReceipt(workDir, receipt); err != nil {
+					log.Printf("[Agent] receipt write failed: %v", err)
+				} else {
+					receiptPath = path
+					eventCh <- Event{Type: "status", Data: "Receipt saved: " + path}
+				}
 			}
 
 			// ── Memory hooks: extract durable memories from this
@@ -866,6 +885,7 @@ func RunLoop(
 				"tokenEstimate": tokenEstimate,
 				"project":       project.Type,
 				"planMode":      planMode,
+				"receipt":       receiptPath,
 			}}
 			return
 		}
@@ -1128,6 +1148,17 @@ func truncateStr(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+func testResultLabel(testResult string) string {
+	switch testResult {
+	case "passed":
+		return "통과"
+	case "failed":
+		return "실패"
+	default:
+		return testResult
+	}
 }
 
 func mustJSON(v interface{}) json.RawMessage {

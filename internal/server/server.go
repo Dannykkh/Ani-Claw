@@ -5,9 +5,10 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/json"
-	"io/fs"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -51,6 +52,7 @@ type Server struct {
 	feedback       *observability.FeedbackStore
 	workDir        string // current workspace
 	port           int
+	loops          *agent.LoopRegistry
 }
 
 func (s *Server) SetTracker(t *observability.Tracker) {
@@ -76,7 +78,18 @@ func New(provider types.Provider, model string, port int) *Server {
 		activeProvider: provider,
 		activeModel:    model,
 		port:           port,
+		// Concurrency cap for simultaneous agent loops across all
+		// projects. 3 is the Wave-1 default — raise it if users report
+		// contention, but a low cap keeps provider spend predictable.
+		loops: agent.NewLoopRegistry(3),
 	}
+}
+
+// Loops exposes the server's agent-loop registry so other subsystems (e.g.,
+// graceful shutdown) can observe or cancel running loops. Returns nil if
+// called before New, which never happens in practice.
+func (s *Server) Loops() *agent.LoopRegistry {
+	return s.loops
 }
 
 func (s *Server) SetProvider(p types.Provider, model string) {
@@ -232,6 +245,8 @@ func (s *Server) Start() error {
 	// Agent loop (coding agent)
 	mux.HandleFunc("POST /api/ask", s.handleAskModel)
 	mux.HandleFunc("POST /api/agent", s.handleAgentLoop)
+	mux.HandleFunc("GET /api/agent/loops", s.handleAgentLoops)
+	mux.HandleFunc("POST /api/agent/{sessionId}/cancel", s.handleAgentCancel)
 	mux.HandleFunc("POST /api/chronos", s.handleChronos)
 	mux.HandleFunc("POST /api/team", s.handleTeamExecute)
 	mux.HandleFunc("GET /api/agent-types", s.handleAgentTypes)
@@ -621,10 +636,10 @@ func (s *Server) handleBrowseFolder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type entry struct {
-		Name  string `json:"name"`
-		IsDir bool   `json:"isDir"`
-		Size  int64  `json:"size"`
-		IsProject bool `json:"isProject"` // has go.mod, package.json, etc.
+		Name      string `json:"name"`
+		IsDir     bool   `json:"isDir"`
+		Size      int64  `json:"size"`
+		IsProject bool   `json:"isProject"` // has go.mod, package.json, etc.
 	}
 
 	var result []entry
@@ -645,7 +660,10 @@ func (s *Server) handleBrowseFolder(w http.ResponseWriter, r *http.Request) {
 			for _, marker := range []string{"go.mod", "package.json", "Cargo.toml", "pyproject.toml", "pom.xml", "*.csproj", "*.sln"} {
 				if strings.Contains(marker, "*") {
 					matches, _ := filepath.Glob(filepath.Join(dir, e.Name(), marker))
-					if len(matches) > 0 { isProject = true; break }
+					if len(matches) > 0 {
+						isProject = true
+						break
+					}
 				} else if _, err := os.Stat(filepath.Join(dir, e.Name(), marker)); err == nil {
 					isProject = true
 					break
@@ -654,9 +672,9 @@ func (s *Server) handleBrowseFolder(w http.ResponseWriter, r *http.Request) {
 		}
 
 		result = append(result, entry{
-			Name:  e.Name(),
-			IsDir: e.IsDir(),
-			Size:  size,
+			Name:      e.Name(),
+			IsDir:     e.IsDir(),
+			Size:      size,
 			IsProject: isProject,
 		})
 	}
@@ -679,7 +697,9 @@ func (s *Server) handleBrowseFolder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetWorkspace(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Path string `json:"path"` }
+	var body struct {
+		Path string `json:"path"`
+	}
 	json.NewDecoder(r.Body).Decode(&body)
 
 	// Verify directory exists
@@ -731,7 +751,9 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	wd := s.workDir
 	s.mu.RUnlock()
-	if wd == "" { wd, _ = os.Getwd() }
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
 
 	relPath := r.URL.Query().Get("path")
 	if relPath == "" {
@@ -763,7 +785,10 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		n, _ := f.Read(buf)
 		f.Close()
 		for _, b := range buf[:n] {
-			if b == 0 { isBinary = true; break }
+			if b == 0 {
+				isBinary = true
+				break
+			}
 		}
 	}
 
@@ -799,8 +824,12 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fileType := "text"
-	if ext == ".md" { fileType = "markdown" }
-	if ext == ".json" { fileType = "json" }
+	if ext == ".md" {
+		fileType = "markdown"
+	}
+	if ext == ".json" {
+		fileType = "json"
+	}
 	if ext == ".go" || ext == ".ts" || ext == ".tsx" || ext == ".js" || ext == ".py" || ext == ".rs" || ext == ".java" || ext == ".cs" {
 		fileType = "code"
 	}
@@ -826,7 +855,9 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	wd := s.workDir
 	s.mu.RUnlock()
-	if wd == "" { wd, _ = os.Getwd() }
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
 
 	var body struct {
 		Path    string `json:"path"`
@@ -861,17 +892,23 @@ func (s *Server) handleFileTree(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RLock()
 	wd := s.workDir
 	s.mu.RUnlock()
-	if wd == "" { wd, _ = os.Getwd() }
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
 
 	root := buildTree(wd, wd, 4, 0) // max depth 4
 	writeJSON(w, root)
 }
 
 func buildTree(basePath, currentPath string, maxDepth, depth int) []*treeNode {
-	if depth >= maxDepth { return nil }
+	if depth >= maxDepth {
+		return nil
+	}
 
 	entries, err := os.ReadDir(currentPath)
-	if err != nil { return nil }
+	if err != nil {
+		return nil
+	}
 
 	skipDirs := map[string]bool{
 		"node_modules": true, ".git": true, "__pycache__": true,
@@ -883,9 +920,15 @@ func buildTree(basePath, currentPath string, maxDepth, depth int) []*treeNode {
 
 	// Directories first
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".") && e.Name() != ".github" { continue }
-		if !e.IsDir() { continue }
-		if skipDirs[e.Name()] { continue }
+		if strings.HasPrefix(e.Name(), ".") && e.Name() != ".github" {
+			continue
+		}
+		if !e.IsDir() {
+			continue
+		}
+		if skipDirs[e.Name()] {
+			continue
+		}
 
 		fullPath := filepath.Join(currentPath, e.Name())
 		rel, _ := filepath.Rel(basePath, fullPath)
@@ -901,15 +944,21 @@ func buildTree(basePath, currentPath string, maxDepth, depth int) []*treeNode {
 
 	// Then files
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".") { continue }
-		if e.IsDir() { continue }
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		if e.IsDir() {
+			continue
+		}
 
 		fullPath := filepath.Join(currentPath, e.Name())
 		rel, _ := filepath.Rel(basePath, fullPath)
 		info, _ := e.Info()
 
 		size := int64(0)
-		if info != nil { size = info.Size() }
+		if info != nil {
+			size = info.Size()
+		}
 
 		nodes = append(nodes, &treeNode{
 			Name: e.Name(),
@@ -1078,9 +1127,9 @@ func (s *Server) handleSetRoute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var update struct {
-		Role     string  `json:"role"`
-		Provider string  `json:"provider"`
-		Model    string  `json:"model"`
+		Role     string         `json:"role"`
+		Provider string         `json:"provider"`
+		Model    string         `json:"model"`
 		Fallback *router.Target `json:"fallback"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
@@ -1145,10 +1194,10 @@ func (d *Server) handleKairosStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	cfg := daemon.GetConfig()
 	writeJSON(w, map[string]any{
-		"enabled":   cfg.Enabled,
-		"state":     daemon.GetState(),
-		"autonomy":  cfg.Autonomy,
-		"tasks":     len(daemon.GetTasks()),
+		"enabled":      cfg.Enabled,
+		"state":        daemon.GetState(),
+		"autonomy":     cfg.Autonomy,
+		"tasks":        len(daemon.GetTasks()),
 		"tickInterval": cfg.TickInterval.String(),
 	})
 }
@@ -1174,7 +1223,10 @@ func (d *Server) handleKairosStart(w http.ResponseWriter, _ *http.Request) {
 	// Auto-add git-watch if not present
 	hasGitWatch := false
 	for _, t := range daemon.GetTasks() {
-		if t.Type == "git-watch" { hasGitWatch = true; break }
+		if t.Type == "git-watch" {
+			hasGitWatch = true
+			break
+		}
 	}
 	if !hasGitWatch {
 		daemon.AddTask(kairos.AutoGitWatchTask())
@@ -1224,7 +1276,9 @@ func (d *Server) handleKairosRemoveTask(w http.ResponseWriter, r *http.Request) 
 		writeError(w, 400, "Daemon not initialized")
 		return
 	}
-	var body struct{ ID string `json:"id"` }
+	var body struct {
+		ID string `json:"id"`
+	}
 	json.NewDecoder(r.Body).Decode(&body)
 	daemon.RemoveTask(body.ID)
 	writeJSON(w, map[string]any{"ok": true})
@@ -1245,7 +1299,9 @@ func (d *Server) handleKairosAutonomy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "Daemon not initialized")
 		return
 	}
-	var body struct{ Mode string `json:"mode"` }
+	var body struct {
+		Mode string `json:"mode"`
+	}
 	json.NewDecoder(r.Body).Decode(&body)
 	daemon.SetAutonomy(body.Mode)
 	writeJSON(w, map[string]any{"ok": true, "autonomy": body.Mode})
@@ -1314,7 +1370,9 @@ func (d *Server) handleKairosWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "Daemon not initialized")
 		return
 	}
-	var body struct{ URL string `json:"url"` }
+	var body struct {
+		URL string `json:"url"`
+	}
 	json.NewDecoder(r.Body).Decode(&body)
 	daemon.Notifier().SetWebhook(body.URL)
 	writeJSON(w, map[string]any{"ok": true, "webhook": body.URL})
@@ -1506,7 +1564,9 @@ func (s *Server) handleSubAgentTasks(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleCommandsList(w http.ResponseWriter, r *http.Request) {
 	workDir := r.URL.Query().Get("workDir")
-	if workDir == "" { workDir, _ = os.Getwd() }
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
 	skills := agent.LoadSkills(workDir)
 	commands := agent.ParseSlashCommands(skills)
 	writeJSON(w, commands)
@@ -1532,7 +1592,9 @@ func (s *Server) handlePlanApprove(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleMCPList(w http.ResponseWriter, r *http.Request) {
 	workDir := r.URL.Query().Get("workDir")
-	if workDir == "" { workDir, _ = os.Getwd() }
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
 	servers := agent.ListMCPServers(workDir)
 	mcpTools := agent.GetMCPTools()
 	writeJSON(w, map[string]any{
@@ -1542,9 +1604,13 @@ func (s *Server) handleMCPList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMCPConnect(w http.ResponseWriter, r *http.Request) {
-	var body struct{ WorkDir string `json:"workDir"` }
+	var body struct {
+		WorkDir string `json:"workDir"`
+	}
 	json.NewDecoder(r.Body).Decode(&body)
-	if body.WorkDir == "" { body.WorkDir, _ = os.Getwd() }
+	if body.WorkDir == "" {
+		body.WorkDir, _ = os.Getwd()
+	}
 	count, err := agent.ConnectMCPServers(body.WorkDir)
 	if err != nil {
 		writeError(w, 500, err.Error())
@@ -1570,13 +1636,15 @@ func (s *Server) handleProjectContext(w http.ResponseWriter, r *http.Request) {
 	skills := agent.LoadSkills(workDir)
 
 	writeJSON(w, map[string]any{
-		"workDir":    workDir,
-		"context":    ctx,
-		"mcpConfig":  mcpCfg,
-		"skills":     len(skills),
+		"workDir":   workDir,
+		"context":   ctx,
+		"mcpConfig": mcpCfg,
+		"skills":    len(skills),
 		"skillNames": func() []string {
 			names := make([]string, len(skills))
-			for i, s := range skills { names[i] = s.Name }
+			for i, s := range skills {
+				names[i] = s.Name
+			}
 			return names
 		}(),
 	})
@@ -1611,13 +1679,17 @@ func (s *Server) handleSkillsList(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleProjectDetect(w http.ResponseWriter, r *http.Request) {
 	workDir := r.URL.Query().Get("workDir")
-	if workDir == "" { workDir, _ = os.Getwd() }
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
 	info := agent.DetectProject(workDir)
 	writeJSON(w, info)
 }
 
 func (s *Server) handleSetSkillSource(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Source string `json:"source"` }
+	var body struct {
+		Source string `json:"source"`
+	}
 	json.NewDecoder(r.Body).Decode(&body)
 	// Save to config
 	cfg := config.Load()
@@ -1722,7 +1794,9 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	var body struct{ Title string `json:"title"` }
+	var body struct {
+		Title string `json:"title"`
+	}
 	json.NewDecoder(r.Body).Decode(&body)
 	if err := store.Rename(id, body.Title); err != nil {
 		writeError(w, 500, err.Error())
@@ -1774,15 +1848,44 @@ func (s *Server) handleAgentLoop(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.RUnlock()
 
+	// Register with the loop registry before we touch the response writer
+	// — if the cap is already hit we reject with 429 instead of opening
+	// an SSE stream that will never stream anything useful.
+	sessionID, loopCtx, release, err := s.loops.Register(r.Context(), workDir)
+	if err != nil {
+		switch {
+		case errors.Is(err, agent.ErrTooManyLoops):
+			w.Header().Set("Retry-After", "5")
+			writeError(w, 429, fmt.Sprintf("too many concurrent agent loops (max %d)", s.loops.MaxConcurrent()))
+		case errors.Is(err, agent.ErrShuttingDown):
+			writeError(w, 503, "server is shutting down")
+		default:
+			writeError(w, 500, err.Error())
+		}
+		return
+	}
+	defer release()
+
 	// SSE response
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(200)
 
+	// First frame: hand the client its session id so it can later POST to
+	// /api/agent/{sessionId}/cancel or query /api/agent/loops.
+	sessionEvent, _ := json.Marshal(agent.Event{
+		Type: "session",
+		Data: map[string]string{"sessionId": sessionID, "workDir": workDir},
+	})
+	fmt.Fprintf(w, "data: %s\n\n", sessionEvent)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
 	eventCh := make(chan agent.Event, 64)
 
-	go agent.RunLoop(r.Context(), provider, model, body.Messages, workDir, respLang, eventCh)
+	go agent.RunLoop(loopCtx, provider, model, body.Messages, workDir, respLang, eventCh)
 
 	for event := range eventCh {
 		data, _ := json.Marshal(event)
@@ -1882,6 +1985,42 @@ func (s *Server) handleAskModel(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ── Agent loop registry ──
+
+// handleAgentLoops returns snapshots of every agent loop currently running
+// on this server. Optional ?workDir=<path> filters to loops in a specific
+// project, which the multi-project UI uses to show per-tab busy state.
+func (s *Server) handleAgentLoops(w http.ResponseWriter, r *http.Request) {
+	workDir := r.URL.Query().Get("workDir")
+	var snaps []agent.ActiveLoopSnapshot
+	if workDir != "" {
+		snaps = s.loops.ByWorkDir(workDir)
+	} else {
+		snaps = s.loops.List()
+	}
+	writeJSON(w, map[string]any{
+		"loops":         snaps,
+		"maxConcurrent": s.loops.MaxConcurrent(),
+		"count":         s.loops.Count(),
+	})
+}
+
+// handleAgentCancel cancels a running loop by session id. Returns 404 if
+// the session is unknown (already finished or never registered). The
+// response body is a small JSON object for clients that want confirmation.
+func (s *Server) handleAgentCancel(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("sessionId")
+	if sessionID == "" {
+		writeError(w, 400, "missing sessionId")
+		return
+	}
+	if ok := s.loops.Cancel(sessionID); !ok {
+		writeError(w, 404, "session not found")
+		return
+	}
+	writeJSON(w, map[string]any{"sessionId": sessionID, "cancelled": true})
+}
+
 // ── Agent Types & Worktrees ──
 
 func (s *Server) handleAgentTypes(w http.ResponseWriter, _ *http.Request) {
@@ -1890,8 +2029,8 @@ func (s *Server) handleAgentTypes(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleMultiModel(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Prompt  string `json:"prompt"`
-		Models  []struct {
+		Prompt string `json:"prompt"`
+		Models []struct {
 			Provider string `json:"provider"`
 			Model    string `json:"model"`
 		} `json:"models"`
@@ -1918,7 +2057,9 @@ func (s *Server) handleRAGSearch(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	workDir := s.workDir
 	s.mu.RUnlock()
-	if workDir == "" { workDir, _ = os.Getwd() }
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
 
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -2275,10 +2416,10 @@ func (s *Server) handleGatewayAddUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name     string   `json:"name"`
-		Role     string   `json:"role"`
-		Budget   float64  `json:"budget"`
-		Allowed  []string `json:"allowedProviders"`
+		Name    string   `json:"name"`
+		Role    string   `json:"role"`
+		Budget  float64  `json:"budget"`
+		Allowed []string `json:"allowedProviders"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, 400, "Invalid JSON")

@@ -29,6 +29,7 @@ AniClew sits between your coding CLI tools and LLM providers, giving you multi-p
 - **23 security validators**: Shell injection detection, dangerous path blocking, sed/jq execution prevention
 - **60+ read-only allowlist**: Per-command flag validation for safe auto-approval
 - **Parallel tool execution**: Read-only tools run concurrently, write tools serial
+- **Verification receipts**: File-changing runs write compact JSON proof under `~/.claude-proxy/receipts/`
 - **Context auto-compaction**: LLM-based summarization with snip fallback + circuit breaker
 
 ### Multi-Agent Teams
@@ -79,6 +80,13 @@ AniClew sits between your coding CLI tools and LLM providers, giving you multi-p
 - **MCP integration**: Stdio client with timeout, health check, auto-reconnect
 - **Bridge mode**: HTTP remote control for IDE/script integration
 - **Session memory**: Disk-backed large result storage (saves tokens)
+
+## Agent Operating Model
+
+The agent loop is organized around a compact operating model: chat, plan,
+execute, verify, team, memory, and skill extraction. See
+[docs/agent-operating-model.md](docs/agent-operating-model.md) for the
+invariants, receipt schema, and cleanup direction.
 
 ## Installation
 
